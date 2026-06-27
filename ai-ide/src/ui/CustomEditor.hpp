@@ -29,6 +29,8 @@ private:
     CppHighlighter* highlighter;
 };
 
+class CompletionPopup;
+
 class CodeEditor : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -49,11 +51,15 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
     void highlightCurrentLine();
     void updateLineNumberArea(const QRect& rect, int dy);
+    void onCompletionReady(int id, const QJsonArray& items);
 
 private:
     void highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections);
@@ -67,6 +73,9 @@ private:
     };
     std::vector<DiffLine> diffLines;
     std::vector<Diagnostic> diagnostics;
+
+    CompletionPopup* completionPopup;
+    int activeCompletionId;
 };
 
 class LineNumberArea : public QWidget {

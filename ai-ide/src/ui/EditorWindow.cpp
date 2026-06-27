@@ -13,8 +13,12 @@
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
 #include "GitWidget.hpp"
+#include "LspClient.hpp"
 #include <QComboBox>
 #include <QLabel>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QUrl>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -259,6 +263,25 @@ void EditorWindow::createCentralEditor() {
         statusBar()->addPermanentWidget(cmakeTargetCombo);
     }
 
+    referencesTable = new QTableWidget(this);
+    referencesTable->setColumnCount(3);
+    referencesTable->setHorizontalHeaderLabels(QStringList() << "File" << "Line" << "Match");
+    referencesTable->setStyleSheet("QTableWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 12px; }"
+                                   "QTableWidget::item:hover { background-color: #2c313c; }"
+                                   "QTableWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+    referencesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    
+    connect(referencesTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* item) {
+        int row = item->row();
+        auto* fileItem = referencesTable->item(row, 0);
+        auto* lineItem = referencesTable->item(row, 1);
+        if (fileItem && lineItem) {
+            gotoLine(fileItem->toolTip(), lineItem->text().toInt());
+        }
+    });
+
+    bottomTabWidget->addTab(referencesTable, "References");
+
     setCentralWidget(container);
 }
 
@@ -431,6 +454,18 @@ void EditorWindow::createDocks() {
     if (pathLineEdit) pathLineEdit->setText(initialPath);
     if (searchWidget) searchWidget->setRootPath(initialPath);
     if (gitWidget) gitWidget->setRootPath(initialPath);
+
+    LspClient::instance().startServer(initialPath);
+
+    connect(&LspClient::instance(), &LspClient::definitionReady, this, [this](int id, const QString& path, int line) {
+        if (!path.isEmpty()) {
+            gotoLine(path, line);
+        }
+    });
+
+    connect(&LspClient::instance(), &LspClient::referencesReady, this, [this](int id, const QJsonArray& locations) {
+        showSymbolReferences(locations);
+    });
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);
@@ -689,6 +724,57 @@ void EditorWindow::updateDocumentDiagnostics() {
                 }
             }
             codeEd->setDiagnostics(fileDiags);
+        }
+    }
+}
+
+void EditorWindow::showSymbolReferences(const QJsonArray& locations) {
+    if (!referencesTable) return;
+
+    referencesTable->setRowCount(0);
+    for (const auto& val : locations) {
+        QJsonObject loc = val.toObject();
+        QString uri = loc["uri"].toString();
+        QString path = QUrl(uri).toLocalFile();
+        int line = loc["range"].toObject()["start"].toObject()["line"].toInt() + 1;
+
+        int row = referencesTable->rowCount();
+        referencesTable->insertRow(row);
+
+        auto* fileItem = new QTableWidgetItem(QFileInfo(path).fileName());
+        fileItem->setToolTip(path);
+        fileItem->setFlags(fileItem->flags() & ~Qt::ItemIsEditable);
+
+        auto* lineItem = new QTableWidgetItem(QString::number(line));
+        lineItem->setFlags(lineItem->flags() & ~Qt::ItemIsEditable);
+
+        QString lineContent = "Code reference";
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            int currentLine = 0;
+            while (!in.atEnd()) {
+                currentLine++;
+                QString content = in.readLine();
+                if (currentLine == line) {
+                    lineContent = content.trimmed();
+                    break;
+                }
+            }
+        }
+
+        auto* codeItem = new QTableWidgetItem(lineContent);
+        codeItem->setFlags(codeItem->flags() & ~Qt::ItemIsEditable);
+
+        referencesTable->setItem(row, 0, fileItem);
+        referencesTable->setItem(row, 1, lineItem);
+        referencesTable->setItem(row, 2, codeItem);
+    }
+
+    if (bottomTabWidget) {
+        int refIdx = bottomTabWidget->indexOf(referencesTable);
+        if (refIdx != -1) {
+            bottomTabWidget->setCurrentIndex(refIdx);
         }
     }
 }

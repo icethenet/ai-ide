@@ -333,6 +333,352 @@ void AIChatPanel::sendPrompt() {
 """)
 
 # ---------------------------------------------------------
+# LSP Client Wrapper (talking to clangd Language Server)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/LspClient.hpp", r"""#pragma once
+#include <QObject>
+#include <QProcess>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QHash>
+#include <QUrl>
+
+class LspClient : public QObject {
+    Q_OBJECT
+public:
+    static LspClient& instance();
+
+    void startServer(const QString& rootPath);
+    void stopServer();
+
+    void didOpen(const QString& filePath, const QString& text);
+    void didChange(const QString& filePath, const QString& text);
+    
+    int requestCompletion(const QString& filePath, int line, int character);
+    int requestDefinition(const QString& filePath, int line, int character);
+    int requestReferences(const QString& filePath, int line, int character);
+
+signals:
+    void completionReady(int id, const QJsonArray& items);
+    void definitionReady(int id, const QString& filePath, int line);
+    void referencesReady(int id, const QJsonArray& locations);
+
+private slots:
+    void readOutput();
+
+private:
+    explicit LspClient(QObject* parent = nullptr);
+    void sendRequest(const QString& method, const QJsonObject& params, int id);
+    void sendNotification(const QString& method, const QJsonObject& params);
+    void parseMessage(const QByteArray& payload);
+
+    QProcess* process;
+    int nextId;
+    QByteArray readBuffer;
+    int expectedContentLength;
+    QHash<int, QString> pendingRequests;
+};
+""")
+
+write(f"{ROOT}/src/ui/LspClient.cpp", r"""#include "LspClient.hpp"
+#include <QDir>
+#include <QRegularExpression>
+#include <QCoreApplication>
+
+LspClient& LspClient::instance() {
+    static LspClient inst;
+    return inst;
+}
+
+LspClient::LspClient(QObject* parent)
+    : QObject(parent), process(nullptr), nextId(1), expectedContentLength(-1) {}
+
+void LspClient::startServer(const QString& rootPath) {
+    if (process && process->state() == QProcess::Running) return;
+
+    process = new QProcess(this);
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(process, &QProcess::readyReadStandardOutput, this, &LspClient::readOutput);
+
+    // Path to clangd executable inside the LLVM-MinGW toolchain
+    QString clangdPath = "C:/Qt/Tools/llvm-mingw_64/bin/clangd.exe";
+    
+    QStringList args;
+    args << "--log=verbose" << "--background-index" << QString("--project-root=%1").arg(rootPath);
+    
+    process->start(clangdPath, args);
+
+    // Send initialize request
+    QJsonObject params;
+    params["processId"] = static_cast<int>(QCoreApplication::applicationPid());
+    params["rootPath"] = rootPath;
+    params["rootUri"] = QUrl::fromLocalFile(rootPath).toString();
+    
+    QJsonObject capabilities;
+    params["capabilities"] = capabilities;
+
+    sendRequest("initialize", params, nextId++);
+}
+
+void LspClient::stopServer() {
+    if (process) {
+        process->terminate();
+        process->waitForFinished(1000);
+        process->deleteLater();
+        process = nullptr;
+    }
+}
+
+void LspClient::sendRequest(const QString& method, const QJsonObject& params, int id) {
+    QJsonObject request;
+    request["jsonrpc"] = "2.0";
+    request["id"] = id;
+    request["method"] = method;
+    request["params"] = params;
+
+    QByteArray doc = QJsonDocument(request).toJson(QJsonDocument::Compact);
+    QByteArray header = QString("Content-Length: %1\r\n\r\n").arg(doc.length()).toUtf8();
+
+    if (process && process->state() == QProcess::Running) {
+        process->write(header + doc);
+    }
+}
+
+void LspClient::sendNotification(const QString& method, const QJsonObject& params) {
+    QJsonObject request;
+    request["jsonrpc"] = "2.0";
+    request["method"] = method;
+    request["params"] = params;
+
+    QByteArray doc = QJsonDocument(request).toJson(QJsonDocument::Compact);
+    QByteArray header = QString("Content-Length: %1\r\n\r\n").arg(doc.length()).toUtf8();
+
+    if (process && process->state() == QProcess::Running) {
+        process->write(header + doc);
+    }
+}
+
+void LspClient::readOutput() {
+    if (!process) return;
+    readBuffer.append(process->readAllStandardOutput());
+
+    while (true) {
+        if (expectedContentLength == -1) {
+            int headerEnd = readBuffer.indexOf("\r\n\r\n");
+            if (headerEnd == -1) break;
+
+            QString headerPart = QString::fromUtf8(readBuffer.left(headerEnd));
+            QRegularExpression lenRegex("Content-Length:\\s*(\\d+)", QRegularExpression::CaseInsensitiveOption);
+            QRegularExpressionMatch match = lenRegex.match(headerPart);
+            if (match.hasMatch()) {
+                expectedContentLength = match.captured(1).toInt();
+            }
+            readBuffer.remove(0, headerEnd + 4);
+        }
+
+        if (expectedContentLength != -1) {
+            if (readBuffer.length() < expectedContentLength) break;
+
+            QByteArray payload = readBuffer.left(expectedContentLength);
+            readBuffer.remove(0, expectedContentLength);
+            expectedContentLength = -1;
+
+            parseMessage(payload);
+        }
+    }
+}
+
+void LspClient::parseMessage(const QByteArray& payload) {
+    QJsonDocument doc = QJsonDocument::fromJson(payload);
+    if (!doc.isObject()) return;
+
+    QJsonObject obj = doc.object();
+    
+    if (obj.contains("id") && (obj.contains("result") || obj.contains("error"))) {
+        int id = obj["id"].toInt();
+        QString method = pendingRequests.take(id);
+        
+        if (method == "textDocument/completion") {
+            QJsonArray items;
+            if (obj["result"].isObject()) {
+                items = obj["result"].toObject()["items"].toArray();
+            } else if (obj["result"].isArray()) {
+                items = obj["result"].toArray();
+            }
+            emit completionReady(id, items);
+        } else if (method == "textDocument/definition") {
+            QString targetPath;
+            int targetLine = 1;
+            
+            QJsonValue res = obj["result"];
+            if (res.isArray()) {
+                QJsonArray arr = res.toArray();
+                if (!arr.isEmpty()) {
+                    QJsonObject loc = arr[0].toObject();
+                    QString uri = loc["uri"].toString();
+                    targetPath = QUrl(uri).toLocalFile();
+                    targetLine = loc["range"].toObject()["start"].toObject()["line"].toInt() + 1;
+                }
+            } else if (res.isObject()) {
+                QJsonObject loc = res.toObject();
+                QString uri = loc["uri"].toString();
+                targetPath = QUrl(uri).toLocalFile();
+                targetLine = loc["range"].toObject()["start"].toObject()["line"].toInt() + 1;
+            }
+            emit definitionReady(id, targetPath, targetLine);
+        } else if (method == "textDocument/references") {
+            emit referencesReady(id, obj["result"].toArray());
+        }
+    }
+}
+
+void LspClient::didOpen(const QString& filePath, const QString& text) {
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    textDocument["languageId"] = "cpp";
+    textDocument["version"] = 1;
+    textDocument["text"] = text;
+    params["textDocument"] = textDocument;
+    sendNotification("textDocument/didOpen", params);
+}
+
+void LspClient::didChange(const QString& filePath, const QString& text) {
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    textDocument["version"] = 2;
+    params["textDocument"] = textDocument;
+
+    QJsonArray contentChanges;
+    QJsonObject change;
+    change["text"] = text;
+    contentChanges.append(change);
+    params["contentChanges"] = contentChanges;
+
+    sendNotification("textDocument/didChange", params);
+}
+
+int LspClient::requestCompletion(const QString& filePath, int line, int character) {
+    int id = nextId++;
+    pendingRequests[id] = "textDocument/completion";
+
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    params["textDocument"] = textDocument;
+
+    QJsonObject position;
+    position["line"] = line;
+    position["character"] = character;
+    params["position"] = position;
+
+    sendRequest("textDocument/completion", params, id);
+    return id;
+}
+
+int LspClient::requestDefinition(const QString& filePath, int line, int character) {
+    int id = nextId++;
+    pendingRequests[id] = "textDocument/definition";
+
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    params["textDocument"] = textDocument;
+
+    QJsonObject position;
+    position["line"] = line;
+    position["character"] = character;
+    params["position"] = position;
+
+    sendRequest("textDocument/definition", params, id);
+    return id;
+}
+
+int LspClient::requestReferences(const QString& filePath, int line, int character) {
+    int id = nextId++;
+    pendingRequests[id] = "textDocument/references";
+
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    params["textDocument"] = textDocument;
+
+    QJsonObject position;
+    position["line"] = line;
+    position["character"] = character;
+    params["position"] = position;
+
+    QJsonObject context;
+    context["includeDeclaration"] = true;
+    params["context"] = context;
+
+    sendRequest("textDocument/references", params, id);
+    return id;
+}
+""")
+
+write(f"{ROOT}/src/ui/CompletionPopup.hpp", r"""#pragma once
+#include <QListWidget>
+#include <QJsonArray>
+
+class CompletionPopup : public QListWidget {
+    Q_OBJECT
+public:
+    explicit CompletionPopup(QWidget* parent = nullptr);
+    void setCompletions(const QJsonArray& items);
+    void showAt(const QPoint& pos);
+};
+""")
+
+write(f"{ROOT}/src/ui/CompletionPopup.cpp", r"""#include "CompletionPopup.hpp"
+#include <QJsonObject>
+
+CompletionPopup::CompletionPopup(QWidget* parent)
+    : QListWidget(parent)
+{
+    setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setFocusPolicy(Qt::NoFocus);
+    
+    setStyleSheet("QListWidget { background-color: #21252b; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; font-family: 'Segoe UI', Arial; font-size: 12px; }"
+                  "QListWidget::item { padding: 4px 8px; }"
+                  "QListWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+    
+    setMinimumWidth(250);
+    setMaximumHeight(150);
+}
+
+void CompletionPopup::setCompletions(const QJsonArray& items) {
+    clear();
+    for (const auto& val : items) {
+        QJsonObject item = val.toObject();
+        QString label = item["label"].toString();
+        QString detail = item["detail"].toString();
+        QString insertText = item["insertText"].toString();
+        if (insertText.isEmpty()) insertText = label;
+
+        auto* listItem = new QListWidgetItem(this);
+        listItem->setText(label);
+        if (!detail.isEmpty()) {
+            listItem->setToolTip(detail);
+        }
+        listItem->setData(Qt::UserRole, insertText);
+    }
+    if (count() > 0) {
+        setCurrentRow(0);
+    }
+}
+
+void CompletionPopup::showAt(const QPoint& pos) {
+    move(pos);
+    show();
+}
+""")
+
+# ---------------------------------------------------------
 # Workspace Search Widget (Asynchronous file scanning)
 # ---------------------------------------------------------
 write(f"{ROOT}/src/ui/SearchWidget.hpp", r"""#pragma once
@@ -985,6 +1331,8 @@ private:
     CppHighlighter* highlighter;
 };
 
+class CompletionPopup;
+
 class CodeEditor : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -1005,11 +1353,15 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
     void highlightCurrentLine();
     void updateLineNumberArea(const QRect& rect, int dy);
+    void onCompletionReady(int id, const QJsonArray& items);
 
 private:
     void highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections);
@@ -1023,6 +1375,9 @@ private:
     };
     std::vector<DiffLine> diffLines;
     std::vector<Diagnostic> diagnostics;
+
+    CompletionPopup* completionPopup;
+    int activeCompletionId;
 };
 
 class LineNumberArea : public QWidget {
@@ -1045,6 +1400,8 @@ private:
 
 write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include "CppHighlighter.hpp"
+#include "LspClient.hpp"
+#include "CompletionPopup.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -1055,6 +1412,10 @@ write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTextBlock>
+#include <QMenu>
+#include <QContextMenuEvent>
+#include <QTimer>
+#include <QProcess>
 
 CustomEditor::CustomEditor(QWidget* parent)
     : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
@@ -1092,9 +1453,12 @@ void CustomEditor::openFile(const QString& path) {
         return;
     }
     QTextStream in(&f);
-    editor->setPlainText(in.readAll());
+    QString content = in.readAll();
+    editor->setPlainText(content);
     filePath = path;
     editor->setFilePath(path);
+    
+    LspClient::instance().didOpen(path, content);
 }
 
 void CustomEditor::saveFile() {
@@ -1134,22 +1498,24 @@ QString CustomEditor::currentFilePath() const {
     return filePath;
 }
 
-#include <QTimer>
-#include <QProcess>
-
 // ---------------------------------------------------------
 // CodeEditor Implementation
 // ---------------------------------------------------------
 CodeEditor::CodeEditor(QWidget* parent)
     : QPlainTextEdit(parent),
       lineNumberArea(nullptr),
-      diffTimer(nullptr)
+      diffTimer(nullptr),
+      completionPopup(nullptr),
+      activeCompletionId(-1)
 {
     lineNumberArea = new LineNumberArea(this);
 
     diffTimer = new QTimer(this);
     diffTimer->setSingleShot(true);
     connect(diffTimer, &QTimer::timeout, this, &CodeEditor::updateGitDiff);
+
+    completionPopup = new CompletionPopup(this);
+    connect(&LspClient::instance(), &LspClient::completionReady, this, &CodeEditor::onCompletionReady);
 
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
@@ -1330,6 +1696,99 @@ void CodeEditor::updateGitDiff() {
     });
     
     proc->start("git", QStringList() << "diff" << "-U0" << fileName);
+}
+
+void CodeEditor::keyPressEvent(QKeyEvent* event) {
+    if (completionPopup && completionPopup->isVisible()) {
+        if (event->key() == Qt::Key_Down) {
+            int r = completionPopup->currentRow();
+            if (r < completionPopup->count() - 1) completionPopup->setCurrentRow(r + 1);
+            return;
+        } else if (event->key() == Qt::Key_Up) {
+            int r = completionPopup->currentRow();
+            if (r > 0) completionPopup->setCurrentRow(r - 1);
+            return;
+        } else if (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return || event->key() == Qt::Key_Tab) {
+            auto* item = completionPopup->currentItem();
+            if (item) {
+                QString replacement = item->data(Qt::UserRole).toString();
+                QTextCursor tc = textCursor();
+                tc.select(QTextCursor::WordUnderCursor);
+                tc.removeSelectedText();
+                tc.insertText(replacement);
+            }
+            completionPopup->hide();
+            return;
+        } else if (event->key() == Qt::Key_Escape) {
+            completionPopup->hide();
+            return;
+        }
+    }
+
+    bool triggerAutocomplete = false;
+    if (event->key() == Qt::Key_Space && (event->modifiers() & Qt::ControlModifier)) {
+        triggerAutocomplete = true;
+        event->accept();
+    } else {
+        QPlainTextEdit::keyPressEvent(event);
+        QString text = event->text();
+        if (text == "." || text == ">" || text == ":") {
+            triggerAutocomplete = true;
+        }
+    }
+
+    if (!filePath.isEmpty() && !event->text().isEmpty()) {
+        LspClient::instance().didChange(filePath, toPlainText());
+    }
+
+    if (triggerAutocomplete && !filePath.isEmpty()) {
+        QTextCursor tc = textCursor();
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        activeCompletionId = LspClient::instance().requestCompletion(filePath, line, col);
+    }
+}
+
+void CodeEditor::onCompletionReady(int id, const QJsonArray& items) {
+    if (id == activeCompletionId) {
+        if (items.isEmpty()) {
+            completionPopup->hide();
+        } else {
+            completionPopup->setCompletions(items);
+            QPoint pos = mapToGlobal(cursorRect().bottomLeft());
+            completionPopup->setGeometry(pos.x(), pos.y() + 5, 250, 150);
+            completionPopup->show();
+        }
+    }
+}
+
+void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
+    QMenu* menu = createStandardContextMenu();
+    menu->addSeparator();
+
+    auto* gotoAction = menu->addAction("Go to Definition");
+    auto* findRefAction = menu->addAction("Find References");
+
+    QAction* selected = menu->exec(event->globalPos());
+    if (selected == gotoAction) {
+        QTextCursor tc = cursorForPosition(event->pos());
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        LspClient::instance().requestDefinition(filePath, line, col);
+    } else if (selected == findRefAction) {
+        QTextCursor tc = cursorForPosition(event->pos());
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        LspClient::instance().requestReferences(filePath, line, col);
+    }
+    delete menu;
+}
+
+void CodeEditor::focusOutEvent(QFocusEvent* event) {
+    QPlainTextEdit::focusOutEvent(event);
+    if (completionPopup) {
+        completionPopup->hide();
+    }
 }
 """)
 
@@ -2613,6 +3072,7 @@ class DebugWidget;
 class QLineEdit;
 class QComboBox;
 class QLabel;
+class QTableWidget;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -2635,6 +3095,7 @@ private:
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
+    void showSymbolReferences(const QJsonArray& locations);
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -2662,6 +3123,7 @@ private:
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;
+    QTableWidget* referencesTable;
 
     struct EditorDiagnostic {
         QString file;
@@ -2688,8 +3150,12 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
 #include "GitWidget.hpp"
+#include "LspClient.hpp"
 #include <QComboBox>
 #include <QLabel>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QUrl>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -2934,6 +3400,25 @@ void EditorWindow::createCentralEditor() {
         statusBar()->addPermanentWidget(cmakeTargetCombo);
     }
 
+    referencesTable = new QTableWidget(this);
+    referencesTable->setColumnCount(3);
+    referencesTable->setHorizontalHeaderLabels(QStringList() << "File" << "Line" << "Match");
+    referencesTable->setStyleSheet("QTableWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 12px; }"
+                                   "QTableWidget::item:hover { background-color: #2c313c; }"
+                                   "QTableWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+    referencesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    
+    connect(referencesTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* item) {
+        int row = item->row();
+        auto* fileItem = referencesTable->item(row, 0);
+        auto* lineItem = referencesTable->item(row, 1);
+        if (fileItem && lineItem) {
+            gotoLine(fileItem->toolTip(), lineItem->text().toInt());
+        }
+    });
+
+    bottomTabWidget->addTab(referencesTable, "References");
+
     setCentralWidget(container);
 }
 
@@ -3106,6 +3591,18 @@ void EditorWindow::createDocks() {
     if (pathLineEdit) pathLineEdit->setText(initialPath);
     if (searchWidget) searchWidget->setRootPath(initialPath);
     if (gitWidget) gitWidget->setRootPath(initialPath);
+
+    LspClient::instance().startServer(initialPath);
+
+    connect(&LspClient::instance(), &LspClient::definitionReady, this, [this](int id, const QString& path, int line) {
+        if (!path.isEmpty()) {
+            gotoLine(path, line);
+        }
+    });
+
+    connect(&LspClient::instance(), &LspClient::referencesReady, this, [this](int id, const QJsonArray& locations) {
+        showSymbolReferences(locations);
+    });
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);
@@ -3364,6 +3861,57 @@ void EditorWindow::updateDocumentDiagnostics() {
                 }
             }
             codeEd->setDiagnostics(fileDiags);
+        }
+    }
+}
+
+void EditorWindow::showSymbolReferences(const QJsonArray& locations) {
+    if (!referencesTable) return;
+
+    referencesTable->setRowCount(0);
+    for (const auto& val : locations) {
+        QJsonObject loc = val.toObject();
+        QString uri = loc["uri"].toString();
+        QString path = QUrl(uri).toLocalFile();
+        int line = loc["range"].toObject()["start"].toObject()["line"].toInt() + 1;
+
+        int row = referencesTable->rowCount();
+        referencesTable->insertRow(row);
+
+        auto* fileItem = new QTableWidgetItem(QFileInfo(path).fileName());
+        fileItem->setToolTip(path);
+        fileItem->setFlags(fileItem->flags() & ~Qt::ItemIsEditable);
+
+        auto* lineItem = new QTableWidgetItem(QString::number(line));
+        lineItem->setFlags(lineItem->flags() & ~Qt::ItemIsEditable);
+
+        QString lineContent = "Code reference";
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            int currentLine = 0;
+            while (!in.atEnd()) {
+                currentLine++;
+                QString content = in.readLine();
+                if (currentLine == line) {
+                    lineContent = content.trimmed();
+                    break;
+                }
+            }
+        }
+
+        auto* codeItem = new QTableWidgetItem(lineContent);
+        codeItem->setFlags(codeItem->flags() & ~Qt::ItemIsEditable);
+
+        referencesTable->setItem(row, 0, fileItem);
+        referencesTable->setItem(row, 1, lineItem);
+        referencesTable->setItem(row, 2, codeItem);
+    }
+
+    if (bottomTabWidget) {
+        int refIdx = bottomTabWidget->indexOf(referencesTable);
+        if (refIdx != -1) {
+            bottomTabWidget->setCurrentIndex(refIdx);
         }
     }
 }

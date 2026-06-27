@@ -23,6 +23,7 @@ class DebugWidget;
 class QLineEdit;
 class QComboBox;
 class QLabel;
+class QTableWidget;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -45,6 +46,7 @@ private:
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
+    void showSymbolReferences(const QJsonArray& locations);
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -72,6 +74,7 @@ private:
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;
+    QTableWidget* referencesTable;
 
     struct EditorDiagnostic {
         QString file;

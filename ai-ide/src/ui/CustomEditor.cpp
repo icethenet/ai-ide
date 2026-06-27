@@ -1,5 +1,7 @@
 #include "CustomEditor.hpp"
 #include "CppHighlighter.hpp"
+#include "LspClient.hpp"
+#include "CompletionPopup.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -10,6 +12,10 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTextBlock>
+#include <QMenu>
+#include <QContextMenuEvent>
+#include <QTimer>
+#include <QProcess>
 
 CustomEditor::CustomEditor(QWidget* parent)
     : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
@@ -47,9 +53,12 @@ void CustomEditor::openFile(const QString& path) {
         return;
     }
     QTextStream in(&f);
-    editor->setPlainText(in.readAll());
+    QString content = in.readAll();
+    editor->setPlainText(content);
     filePath = path;
     editor->setFilePath(path);
+    
+    LspClient::instance().didOpen(path, content);
 }
 
 void CustomEditor::saveFile() {
@@ -89,22 +98,24 @@ QString CustomEditor::currentFilePath() const {
     return filePath;
 }
 
-#include <QTimer>
-#include <QProcess>
-
 // ---------------------------------------------------------
 // CodeEditor Implementation
 // ---------------------------------------------------------
 CodeEditor::CodeEditor(QWidget* parent)
     : QPlainTextEdit(parent),
       lineNumberArea(nullptr),
-      diffTimer(nullptr)
+      diffTimer(nullptr),
+      completionPopup(nullptr),
+      activeCompletionId(-1)
 {
     lineNumberArea = new LineNumberArea(this);
 
     diffTimer = new QTimer(this);
     diffTimer->setSingleShot(true);
     connect(diffTimer, &QTimer::timeout, this, &CodeEditor::updateGitDiff);
+
+    completionPopup = new CompletionPopup(this);
+    connect(&LspClient::instance(), &LspClient::completionReady, this, &CodeEditor::onCompletionReady);
 
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
@@ -285,4 +296,97 @@ void CodeEditor::updateGitDiff() {
     });
     
     proc->start("git", QStringList() << "diff" << "-U0" << fileName);
+}
+
+void CodeEditor::keyPressEvent(QKeyEvent* event) {
+    if (completionPopup && completionPopup->isVisible()) {
+        if (event->key() == Qt::Key_Down) {
+            int r = completionPopup->currentRow();
+            if (r < completionPopup->count() - 1) completionPopup->setCurrentRow(r + 1);
+            return;
+        } else if (event->key() == Qt::Key_Up) {
+            int r = completionPopup->currentRow();
+            if (r > 0) completionPopup->setCurrentRow(r - 1);
+            return;
+        } else if (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return || event->key() == Qt::Key_Tab) {
+            auto* item = completionPopup->currentItem();
+            if (item) {
+                QString replacement = item->data(Qt::UserRole).toString();
+                QTextCursor tc = textCursor();
+                tc.select(QTextCursor::WordUnderCursor);
+                tc.removeSelectedText();
+                tc.insertText(replacement);
+            }
+            completionPopup->hide();
+            return;
+        } else if (event->key() == Qt::Key_Escape) {
+            completionPopup->hide();
+            return;
+        }
+    }
+
+    bool triggerAutocomplete = false;
+    if (event->key() == Qt::Key_Space && (event->modifiers() & Qt::ControlModifier)) {
+        triggerAutocomplete = true;
+        event->accept();
+    } else {
+        QPlainTextEdit::keyPressEvent(event);
+        QString text = event->text();
+        if (text == "." || text == ">" || text == ":") {
+            triggerAutocomplete = true;
+        }
+    }
+
+    if (!filePath.isEmpty() && !event->text().isEmpty()) {
+        LspClient::instance().didChange(filePath, toPlainText());
+    }
+
+    if (triggerAutocomplete && !filePath.isEmpty()) {
+        QTextCursor tc = textCursor();
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        activeCompletionId = LspClient::instance().requestCompletion(filePath, line, col);
+    }
+}
+
+void CodeEditor::onCompletionReady(int id, const QJsonArray& items) {
+    if (id == activeCompletionId) {
+        if (items.isEmpty()) {
+            completionPopup->hide();
+        } else {
+            completionPopup->setCompletions(items);
+            QPoint pos = mapToGlobal(cursorRect().bottomLeft());
+            completionPopup->setGeometry(pos.x(), pos.y() + 5, 250, 150);
+            completionPopup->show();
+        }
+    }
+}
+
+void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
+    QMenu* menu = createStandardContextMenu();
+    menu->addSeparator();
+
+    auto* gotoAction = menu->addAction("Go to Definition");
+    auto* findRefAction = menu->addAction("Find References");
+
+    QAction* selected = menu->exec(event->globalPos());
+    if (selected == gotoAction) {
+        QTextCursor tc = cursorForPosition(event->pos());
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        LspClient::instance().requestDefinition(filePath, line, col);
+    } else if (selected == findRefAction) {
+        QTextCursor tc = cursorForPosition(event->pos());
+        int line = tc.blockNumber();
+        int col = tc.columnNumber();
+        LspClient::instance().requestReferences(filePath, line, col);
+    }
+    delete menu;
+}
+
+void CodeEditor::focusOutEvent(QFocusEvent* event) {
+    QPlainTextEdit::focusOutEvent(event);
+    if (completionPopup) {
+        completionPopup->hide();
+    }
 }
