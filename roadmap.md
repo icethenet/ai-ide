@@ -77,3 +77,47 @@ This document outlines high-impact architectural and feature enhancements to tra
 ### ⌨️ Command Palette (`Ctrl+Shift+P`)
 *   **Concept**: Floating overlay search bar to execute IDE commands quickly.
 *   **Tech Stack**: Create a centered dropdown dialog that lists all actions (new file, build, theme picker, debug settings). Support fuzzy searching to run any menu action immediately via keyboard commands.
+
+---
+
+## 7. Phased Implementation Plan
+
+We propose executing these upgrades in 5 sequential phases to build up core developer features systematically.
+
+```mermaid
+graph TD
+    PA[Phase A: Editor Core & Layout Tuning] --> PB[Phase B: Source Control & Search]
+    PB --> PC[Phase C: LSP Client & Autocomplete]
+    PC --> PD[Phase D: Visual Debugger Integration]
+    PD --> PE[Phase E: AI Context & Copilot]
+```
+
+### Phase A: Editor Core & Layout Tuning (Short Term)
+*   **Syntax Highlighting**: Subclass `QSyntaxHighlighter` for C++ and Python token colorization.
+*   **Line Numbers Gutter**: Implement a line number area widget positioned left-adjacent to the `QPlainTextEdit` viewport, aligning vertically on scroll events.
+*   **Command Palette**: Build a search-centric dropdown popup (`Ctrl+Shift+P`) to quickly execute IDE commands.
+*   *Verification*: Launch IDE, confirm line numbers dynamically draw, code highlights cleanly, and palette triggers search lists.
+
+### Phase B: Source Control & Project Search (Short Term)
+*   **Ripgrep Sidebar**: Add a search explorer panel. Run `rg.exe` asynchronously to display multi-file grep search hits in a clickable tree.
+*   **Visual Git Client**: Fully implement status queries, staging checkboxes, a commit text box, and push/pull buttons in the Source Control panel.
+*   **Gutter Diff Indicators**: Draw subtle blue/green/red markers in the line gutter next to code lines changed relative to `git HEAD`.
+*   *Verification*: Run text searches across the folder, stage files visually, commit them, and check that modified editor lines draw gutter markers.
+
+### Phase C: Language Server Protocol (LSP) Client (Medium Term)
+*   **clangd Process Integration**: Spawn `clangd.exe` via `QProcess` in standard stdin/stdout JSON-RPC mode.
+*   **Live Error Diagnostics**: Parse live LSP diagnostic notices to draw red wavy underlines under compiler issues as the user types.
+*   **Completion Dropdown**: Intercept character inputs (like `.`, `->`, `::`) to fetch autocomplete lists and show them in a floating menu box.
+*   *Verification*: Type broken code in a document, verify red underlines show immediately without building, and confirm autocomplete overlays trigger correctly.
+
+### Phase D: Visual Debugger Integration (Medium Term)
+*   **Visual Gutter Breakpoints**: Connect line number gutter click events to issue `-break-insert` commands to GDB/LLDB-MI. Draw a red circle marker in the gutter.
+*   **Call Stack & Threads Tree**: Parse frame listings on stop events and display threads and stack levels in sidebar tree lists.
+*   **Hover Value Evaluator**: Enable tooltips in the editor viewport to query variables under the mouse cursor via `-data-evaluate-expression`.
+*   *Verification*: Set breakpoint in gutter, click debug, verify GDB hits the line, and hover over variables to see tooltips showing active states.
+
+### Phase E: AI Context & Copilot (Long Term)
+*   **Inline overlay (`Ctrl+I`)**: Create a cursor-aligned floating textbox prompt. Refactor local selections and display inline side-by-side diff previews directly in the document.
+*   **Keystroke Copilot Autocomplete**: Run debounce timers on typing to call a local Ollama model (`deepseek-coder`) and show ghost-text autocompletions.
+*   **Local Project Embeddings**: Extract code embeddings and index files into a sqlite vector database, allowing conversational RAG over the full workspace.
+*   *Verification*: Select a method, press `Ctrl+I`, write a refactor command, and verify changes show inline. Verify ghost text autocompletions complete on `Tab`.
