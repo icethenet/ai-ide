@@ -443,7 +443,11 @@ VectorIndexManager::~VectorIndexManager() {
 }
 
 void VectorIndexManager::initDb() {
-    db = QSqlDatabase::addDatabase("QSQLITE", "vector_connection");
+    if (QSqlDatabase::contains("vector_connection")) {
+        db = QSqlDatabase::database("vector_connection");
+    } else {
+        db = QSqlDatabase::addDatabase("QSQLITE", "vector_connection");
+    }
     QDir().mkpath(".antigravity");
     db.setDatabaseName(".antigravity/vector_index.db");
     
@@ -618,7 +622,12 @@ IndexWorker::IndexWorker(const QString& rootPath, QObject* parent)
 void IndexWorker::run() {
     if (root.isEmpty()) return;
 
-    QSqlDatabase threadDb = QSqlDatabase::addDatabase("QSQLITE", "thread_connection");
+    QSqlDatabase threadDb;
+    if (QSqlDatabase::contains("thread_connection")) {
+        threadDb = QSqlDatabase::database("thread_connection");
+    } else {
+        threadDb = QSqlDatabase::addDatabase("QSQLITE", "thread_connection");
+    }
     threadDb.setDatabaseName(".antigravity/vector_index.db");
     if (!threadDb.open()) return;
 
