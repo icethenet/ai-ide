@@ -332,6 +332,313 @@ void AIChatPanel::sendPrompt() {
 """)
 
 # ---------------------------------------------------------
+# C++ Syntax Highlighter
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/CppHighlighter.hpp", r"""#pragma once
+#include <QSyntaxHighlighter>
+#include <QTextCharFormat>
+#include <QRegularExpression>
+#include <vector>
+
+class CppHighlighter : public QSyntaxHighlighter {
+    Q_OBJECT
+public:
+    explicit CppHighlighter(QTextDocument* parent = nullptr);
+
+protected:
+    void highlightBlock(const QString& text) override;
+
+private:
+    struct HighlightingRule {
+        QRegularExpression pattern;
+        QTextCharFormat format;
+    };
+    std::vector<HighlightingRule> highlightingRules;
+
+    QTextCharFormat keywordFormat;
+    QTextCharFormat classFormat;
+    QTextCharFormat singleLineCommentFormat;
+    QTextCharFormat multiLineCommentFormat;
+    QTextCharFormat quotationFormat;
+    QTextCharFormat functionFormat;
+    QTextCharFormat preprocessorFormat;
+    QTextCharFormat numberFormat;
+    
+    QRegularExpression commentStartExpression;
+    QRegularExpression commentEndExpression;
+};
+""")
+
+write(f"{ROOT}/src/ui/CppHighlighter.cpp", r"""#include "CppHighlighter.hpp"
+#include <QColor>
+#include <QFont>
+#include <QStringList>
+
+CppHighlighter::CppHighlighter(QTextDocument* parent)
+    : QSyntaxHighlighter(parent)
+{
+    HighlightingRule rule;
+
+    // Keywords (Purple-ish theme matching modern dark UI)
+    keywordFormat.setForeground(QColor(198, 120, 221));
+    keywordFormat.setFontWeight(QFont::Bold);
+    QStringList keywordPatterns;
+    keywordPatterns << "\\bchar\\b" << "\\bclass\\b" << "\\bconst\\b"
+                    << "\\bdouble\\b" << "\\benum\\b" << "\\bexplicit\\b"
+                    << "\\bfloat\\b" << "\\bint\\b" << "\\blong\\b"
+                    << "\\boperator\\b" << "\\bprivate\\b" << "\\bprotected\\b"
+                    << "\\bpublic\\b" << "\\bshort\\b" << "\\bsignals\\b"
+                    << "\\bsigned\\b" << "\\bslots\\b" << "\\bstatic\\b"
+                    << "\\bstruct\\b" << "\\btemplate\\b" << "\\btypedef\\b"
+                    << "\\btypename\\b" << "\\bunion\\b" << "\\bunsigned\\b"
+                    << "\\bvirtual\\b" << "\\bvoid\\b" << "\\bvolatile\\b"
+                    << "\\bbool\\b" << "\\bif\\b" << "\\belse\\b"
+                    << "\\bfor\\b" << "\\bwhile\\b" << "\\bdo\\b"
+                    << "\\breturn\\b" << "\\bswitch\\b" << "\\bcase\\b"
+                    << "\\bbreak\\b" << "\\bcontinue\\b" << "\\bdefault\\b"
+                    << "\\bnew\\b" << "\\bdelete\\b" << "\\btry\\b"
+                    << "\\bcatch\\b" << "\\bthrow\\b" << "\\bnamespace\\b"
+                    << "\\busing\\b" << "\\bconstexpr\\b" << "\\bnullptr\\b";
+    for (const QString& pattern : keywordPatterns) {
+        rule.pattern = QRegularExpression(pattern);
+        rule.format = keywordFormat;
+        highlightingRules.push_back(rule);
+    }
+
+    // Classes / Types (Yellow)
+    classFormat.setForeground(QColor(229, 192, 123));
+    classFormat.setFontWeight(QFont::Bold);
+    rule.pattern = QRegularExpression("\\b[A-Z][a-zA-Z0-9_]*\\b");
+    rule.format = classFormat;
+    highlightingRules.push_back(rule);
+
+    // Preprocessor directives (Red)
+    preprocessorFormat.setForeground(QColor(224, 108, 117));
+    rule.pattern = QRegularExpression("^\\s*#\\s*[a-zA-Z]+");
+    rule.format = preprocessorFormat;
+    highlightingRules.push_back(rule);
+
+    // Functions (Blue)
+    functionFormat.setForeground(QColor(97, 175, 239));
+    rule.pattern = QRegularExpression("\\b[A-Za-z0-9_]+(?=\\s*\\()");
+    rule.format = functionFormat;
+    highlightingRules.push_back(rule);
+
+    // Strings (Green)
+    quotationFormat.setForeground(QColor(152, 195, 121));
+    rule.pattern = QRegularExpression("\".*?\"");
+    rule.format = quotationFormat;
+    highlightingRules.push_back(rule);
+
+    // Numbers (Orange)
+    numberFormat.setForeground(QColor(209, 154, 102));
+    rule.pattern = QRegularExpression("\\b\\d+(\\.\\d+)?\\b");
+    rule.format = numberFormat;
+    highlightingRules.push_back(rule);
+
+    // Single line comments (Gray)
+    singleLineCommentFormat.setForeground(QColor(92, 99, 112));
+    singleLineCommentFormat.setFontItalic(true);
+    rule.pattern = QRegularExpression("//[^\n]*");
+    rule.format = singleLineCommentFormat;
+    highlightingRules.push_back(rule);
+
+    // Multi-line comments
+    multiLineCommentFormat.setForeground(QColor(92, 99, 112));
+    multiLineCommentFormat.setFontItalic(true);
+    commentStartExpression = QRegularExpression(R"(\/\*)");
+    commentEndExpression = QRegularExpression(R"(\*\/)");
+}
+
+void CppHighlighter::highlightBlock(const QString& text) {
+    for (const auto& rule : highlightingRules) {
+        QRegularExpressionMatchIterator matchIterator = rule.pattern.globalMatch(text);
+        while (matchIterator.hasNext()) {
+            QRegularExpressionMatch match = matchIterator.next();
+            setFormat(match.capturedStart(), match.capturedLength(), rule.format);
+        }
+    }
+
+    setCurrentBlockState(0);
+
+    int startIndex = 0;
+    if (previousBlockState() != 1) {
+        QRegularExpressionMatch startMatch = commentStartExpression.match(text);
+        if (startMatch.hasMatch()) {
+            startIndex = startMatch.capturedStart();
+        } else {
+            startIndex = -1;
+        }
+    }
+
+    while (startIndex >= 0) {
+        QRegularExpressionMatch endMatch = commentEndExpression.match(text, startIndex);
+        int commentLength;
+        if (!endMatch.hasMatch()) {
+            setCurrentBlockState(1);
+            commentLength = text.length() - startIndex;
+        } else {
+            commentLength = endMatch.capturedStart() - startIndex + endMatch.capturedLength();
+        }
+        setFormat(startIndex, commentLength, multiLineCommentFormat);
+        
+        if (currentBlockState() == 1) {
+            break;
+        }
+        
+        QRegularExpressionMatch nextStartMatch = commentStartExpression.match(text, startIndex + commentLength);
+        if (nextStartMatch.hasMatch()) {
+            startIndex = nextStartMatch.capturedStart();
+        } else {
+            startIndex = -1;
+        }
+    }
+}
+""")
+
+# ---------------------------------------------------------
+# Command Palette (Fuzzy command search)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/CommandPalette.hpp", r"""#pragma once
+#include <QDialog>
+#include <QLineEdit>
+#include <QListWidget>
+#include <vector>
+#include <functional>
+
+class CommandPalette : public QDialog {
+    Q_OBJECT
+public:
+    explicit CommandPalette(QWidget* parent = nullptr);
+
+    void addCommand(const QString& name, const QString& shortcut, const std::function<void()>& action);
+    void showPalette();
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
+private slots:
+    void filterCommands(const QString& text);
+    void executeSelected();
+
+private:
+    struct PaletteCommand {
+        QString name;
+        QString shortcut;
+        std::function<void()> action;
+    };
+    std::vector<PaletteCommand> commands;
+
+    QLineEdit* searchEdit;
+    QListWidget* listWidget;
+};
+""")
+
+write(f"{ROOT}/src/ui/CommandPalette.cpp", r"""#include "CommandPalette.hpp"
+#include <QVBoxLayout>
+#include <QKeyEvent>
+#include <QVariant>
+
+CommandPalette::CommandPalette(QWidget* parent)
+    : QDialog(parent, Qt::FramelessWindowHint | Qt::Popup)
+{
+    setMinimumWidth(550);
+    setMaximumHeight(350);
+    setStyleSheet("QDialog { background-color: #21252b; border: 1px solid #3e4452; border-radius: 8px; }"
+                  "QLineEdit { background-color: #2c313c; color: #ffffff; border: 1px solid #181a1f; border-radius: 4px; padding: 8px; font-size: 14px; font-family: 'Segoe UI', Arial; }"
+                  "QListWidget { background-color: #21252b; color: #abb2bf; border: none; font-size: 13px; font-family: 'Segoe UI', Arial; }"
+                  "QListWidget::item { padding: 10px; border-bottom: 1px solid #2c313c; border-radius: 4px; }"
+                  "QListWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+
+    auto* layout = new QVBoxLayout(this);
+    searchEdit = new QLineEdit(this);
+    searchEdit->setPlaceholderText("Type a command to search...");
+    layout->addWidget(searchEdit);
+
+    listWidget = new QListWidget(this);
+    layout->addWidget(listWidget);
+
+    connect(searchEdit, &QLineEdit::textChanged, this, &CommandPalette::filterCommands);
+    connect(listWidget, &QListWidget::itemActivated, this, &CommandPalette::executeSelected);
+
+    searchEdit->installEventFilter(this);
+}
+
+void CommandPalette::addCommand(const QString& name, const QString& shortcut, const std::function<void()>& action) {
+    commands.push_back({name, shortcut, action});
+}
+
+void CommandPalette::showPalette() {
+    searchEdit->clear();
+    filterCommands("");
+    
+    if (parentWidget()) {
+        QPoint center = parentWidget()->rect().center();
+        QPoint pos(center.x() - width() / 2, parentWidget()->rect().top() + 50);
+        move(parentWidget()->mapToGlobal(pos));
+    }
+    
+    show();
+    searchEdit->setFocus();
+}
+
+void CommandPalette::filterCommands(const QString& text) {
+    listWidget->clear();
+    for (size_t i = 0; i < commands.size(); ++i) {
+        if (text.isEmpty() || commands[i].name.contains(text, Qt::CaseInsensitive)) {
+            auto* item = new QListWidgetItem(listWidget);
+            QString label = commands[i].name;
+            if (!commands[i].shortcut.isEmpty()) {
+                label += "   (" + commands[i].shortcut + ")";
+            }
+            item->setText(label);
+            item->setData(Qt::UserRole, QVariant::fromValue(static_cast<int>(i)));
+        }
+    }
+    if (listWidget->count() > 0) {
+        listWidget->setCurrentRow(0);
+    }
+}
+
+void CommandPalette::executeSelected() {
+    auto* item = listWidget->currentItem();
+    if (item) {
+        int idx = item->data(Qt::UserRole).toInt();
+        if (idx >= 0 && idx < static_cast<int>(commands.size())) {
+            commands[idx].action();
+        }
+    }
+    accept();
+}
+
+bool CommandPalette::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == searchEdit && event->type() == QEvent::KeyPress) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (keyEvent->key() == Qt::Key_Down) {
+            int row = listWidget->currentRow();
+            if (row < listWidget->count() - 1) {
+                listWidget->setCurrentRow(row + 1);
+            }
+            return true;
+        } else if (keyEvent->key() == Qt::Key_Up) {
+            int row = listWidget->currentRow();
+            if (row > 0) {
+                listWidget->setCurrentRow(row - 1);
+            }
+            return true;
+        } else if (keyEvent->key() == Qt::Key_Enter || keyEvent->key() == Qt::Key_Return) {
+            executeSelected();
+            return true;
+        } else if (keyEvent->key() == Qt::Key_Escape) {
+            reject();
+            return true;
+        }
+    }
+    return QDialog::eventFilter(obj, event);
+}
+""")
+
+# ---------------------------------------------------------
 # 1. Custom editor widget
 # ---------------------------------------------------------
 write(f"{ROOT}/src/ui/CustomEditor.hpp", r"""#pragma once
@@ -339,6 +646,9 @@ write(f"{ROOT}/src/ui/CustomEditor.hpp", r"""#pragma once
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QString>
+
+class CodeEditor;
+class CppHighlighter;
 
 class CustomEditor : public QWidget {
     Q_OBJECT
@@ -355,14 +665,53 @@ signals:
     void closeRequested();
 
 private:
-    QPlainTextEdit* editor;
+    CodeEditor* editor;
     QPushButton* closeButton;
     QPushButton* saveAsButton;
     QString filePath;
+    CppHighlighter* highlighter;
+};
+
+class CodeEditor : public QPlainTextEdit {
+    Q_OBJECT
+public:
+    explicit CodeEditor(QWidget* parent = nullptr);
+
+    void lineNumberAreaPaintEvent(QPaintEvent* event);
+    int lineNumberAreaWidth();
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
+private slots:
+    void updateLineNumberAreaWidth(int newBlockCount);
+    void highlightCurrentLine();
+    void updateLineNumberArea(const QRect& rect, int dy);
+
+private:
+    QWidget* lineNumberArea;
+};
+
+class LineNumberArea : public QWidget {
+public:
+    explicit LineNumberArea(CodeEditor* editor) : QWidget(editor), codeEditor(editor) {}
+
+    QSize sizeHint() const override {
+        return QSize(codeEditor->lineNumberAreaWidth(), 0);
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        codeEditor->lineNumberAreaPaintEvent(event);
+    }
+
+private:
+    CodeEditor* codeEditor;
 };
 """)
 
 write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
+#include "CppHighlighter.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -370,14 +719,19 @@ write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include <QTextStream>
 #include <QFileDialog>
 #include <QDir>
+#include <QPainter>
+#include <QPaintEvent>
+#include <QTextBlock>
 
 CustomEditor::CustomEditor(QWidget* parent)
-    : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr)
+    : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
 {
     auto* mainLayout = new QVBoxLayout(this);
 
-    editor = new QPlainTextEdit(this);
+    editor = new CodeEditor(this);
     mainLayout->addWidget(editor);
+
+    highlighter = new CppHighlighter(editor->document());
 
     auto* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch();
@@ -443,6 +797,96 @@ void CustomEditor::saveAsFile() {
 
 QString CustomEditor::currentFilePath() const {
     return filePath;
+}
+
+// ---------------------------------------------------------
+// CodeEditor Implementation
+// ---------------------------------------------------------
+CodeEditor::CodeEditor(QWidget* parent) : QPlainTextEdit(parent) {
+    lineNumberArea = new LineNumberArea(this);
+
+    connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
+    connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
+    connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
+
+    updateLineNumberAreaWidth(0);
+    highlightCurrentLine();
+    
+    setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #abb2bf; font-family: 'Consolas', monospace; font-size: 11pt; border: none; }");
+}
+
+int CodeEditor::lineNumberAreaWidth() {
+    int digits = 1;
+    int max = std::max(1, blockCount());
+    while (max >= 10) {
+        max /= 10;
+        digits++;
+    }
+    int space = 15 + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+    return space;
+}
+
+void CodeEditor::updateLineNumberAreaWidth(int /* newBlockCount */) {
+    setViewportMargins(lineNumberAreaWidth(), 0, 0, 0);
+}
+
+void CodeEditor::updateLineNumberArea(const QRect& rect, int dy) {
+    if (dy) {
+        lineNumberArea->scroll(0, dy);
+    } else {
+        lineNumberArea->update(0, rect.y(), lineNumberArea->width(), rect.height());
+    }
+
+    if (rect.contains(viewport()->rect())) {
+        updateLineNumberAreaWidth(0);
+    }
+}
+
+void CodeEditor::resizeEvent(QResizeEvent* event) {
+    QPlainTextEdit::resizeEvent(event);
+
+    QRect cr = contentsRect();
+    lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
+}
+
+void CodeEditor::highlightCurrentLine() {
+    QList<QTextEdit::ExtraSelection> extraSelections;
+
+    if (!isReadOnly()) {
+        QTextEdit::ExtraSelection selection;
+        QColor lineColor = QColor(Qt::gray).darker(300);
+        selection.format.setBackground(lineColor);
+        selection.format.setProperty(QTextFormat::FullWidthSelection, true);
+        selection.cursor = textCursor();
+        selection.cursor.clearSelection();
+        extraSelections.append(selection);
+    }
+
+    setExtraSelections(extraSelections);
+}
+
+void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
+    QPainter painter(lineNumberArea);
+    painter.fillRect(event->rect(), QColor(33, 37, 43));
+
+    QTextBlock block = firstVisibleBlock();
+    int blockNumber = block.blockNumber();
+    int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).y());
+    int bottom = top + qRound(blockBoundingRect(block).height());
+
+    while (block.isValid() && top <= event->rect().bottom()) {
+        if (block.isVisible() && bottom >= event->rect().top()) {
+            QString number = QString::number(blockNumber + 1);
+            painter.setPen(QColor(92, 99, 112));
+            painter.drawText(0, top, lineNumberArea->width() - 5, fontMetrics().height(),
+                             Qt::AlignRight | Qt::AlignVCenter, number);
+        }
+
+        block = block.next();
+        top = bottom;
+        bottom = top + qRound(blockBoundingRect(block).height());
+        blockNumber++;
+    }
 }
 """)
 
@@ -1464,6 +1908,7 @@ class CustomEditor;
 class FileBrowser;
 class WelcomeWidget;
 class AIPatchController;
+class CommandPalette;
 class ClipboardListener;
 class QShowEvent;
 class QSplitter;
@@ -1492,6 +1937,7 @@ private:
     void parseBuildLine(const QString& line);
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
+    void showCommandPalette();
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -1508,6 +1954,7 @@ private:
     CustomEditor* editor;
     FileBrowser* fileBrowser;
     AIPatchController* aiPatchController;
+    CommandPalette* commandPalette;
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
@@ -1526,6 +1973,7 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "ProblemsWidget.hpp"
 #include "DebugWidget.hpp"
 #include "WelcomeWidget.hpp"
+#include "CommandPalette.hpp"
 
 #include <QRegularExpression>
 
@@ -1546,6 +1994,7 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QMessageBox>
 
 EditorWindow::EditorWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -1561,6 +2010,7 @@ EditorWindow::EditorWindow(QWidget *parent)
       buildProcess(nullptr),
       fileBrowser(nullptr),
       aiPatchController(nullptr),
+      commandPalette(nullptr),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this))
 {
@@ -1699,6 +2149,50 @@ void EditorWindow::openWelcomeTab() {
     tabWidget->setCurrentIndex(idx);
 }
 
+void EditorWindow::showCommandPalette() {
+    if (!commandPalette) {
+        commandPalette = new CommandPalette(this);
+        commandPalette->addCommand("File: New File", "Ctrl+N", [this]() { openFileInTab(""); });
+        commandPalette->addCommand("File: Open File", "Ctrl+O", [this]() {
+            QString path = QFileDialog::getOpenFileName(this, "Open File");
+            if (!path.isEmpty()) openFileInTab(path);
+        });
+        commandPalette->addCommand("File: Open Folder", "", [this]() {
+            QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder");
+            if (!dir.isEmpty() && fileBrowser) {
+                fileBrowser->setRootDirectory(dir);
+            }
+        });
+        commandPalette->addCommand("Build: Build Project", "Ctrl+B", [this]() { runBuild(); });
+        commandPalette->addCommand("AI: Refactor with AI", "", [this]() {
+            bool ok = false;
+            QString instr = QInputDialog::getText(this, "AI Refactor",
+                                                  "Describe the refactor:",
+                                                  QLineEdit::Normal,
+                                                  "", &ok);
+            if (ok && !instr.trimmed().isEmpty()) {
+                aiPatchController->setEditor(currentEditor());
+                aiPatchController->requestRefactor(instr.trimmed());
+            }
+        });
+        commandPalette->addCommand("AI: Provider Settings", "", [this]() {
+            AdminDialog dlg(this);
+            dlg.exec();
+        });
+        commandPalette->addCommand("Debugger: Start/Stop", "", [this]() {
+            if (bottomTabWidget && debugTab) {
+                bottomTabWidget->setCurrentWidget(debugTab);
+                auto* startBtn = debugTab->findChild<QPushButton*>();
+                if (startBtn) startBtn->click();
+            }
+        });
+        commandPalette->addCommand("Help: About", "", [this]() {
+            QMessageBox::about(this, "About AI-IDE", "AI-IDE\nNext-generation C++ development powered by LLVM and Local AI.");
+        });
+    }
+    commandPalette->showPalette();
+}
+
 void EditorWindow::createDocks() {
     // File Browser (Left)
     auto* fileDock = new QDockWidget("Files", this);
@@ -1806,6 +2300,11 @@ void EditorWindow::createMenus() {
 
     auto *helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About");
+
+    auto *paletteAction = new QAction("Command Palette", this);
+    paletteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+    connect(paletteAction, &QAction::triggered, this, &EditorWindow::showCommandPalette);
+    addAction(paletteAction);
 }
 
 void EditorWindow::runBuild() {

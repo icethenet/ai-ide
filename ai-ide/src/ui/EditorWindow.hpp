@@ -8,6 +8,7 @@ class CustomEditor;
 class FileBrowser;
 class WelcomeWidget;
 class AIPatchController;
+class CommandPalette;
 class ClipboardListener;
 class QShowEvent;
 class QSplitter;
@@ -36,6 +37,7 @@ private:
     void parseBuildLine(const QString& line);
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
+    void showCommandPalette();
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -52,6 +54,7 @@ private:
     CustomEditor* editor;
     FileBrowser* fileBrowser;
     AIPatchController* aiPatchController;
+    CommandPalette* commandPalette;
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;

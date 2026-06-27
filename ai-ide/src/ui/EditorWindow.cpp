@@ -10,6 +10,7 @@
 #include "ProblemsWidget.hpp"
 #include "DebugWidget.hpp"
 #include "WelcomeWidget.hpp"
+#include "CommandPalette.hpp"
 
 #include <QRegularExpression>
 
@@ -30,6 +31,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QMessageBox>
 
 EditorWindow::EditorWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -45,6 +47,7 @@ EditorWindow::EditorWindow(QWidget *parent)
       buildProcess(nullptr),
       fileBrowser(nullptr),
       aiPatchController(nullptr),
+      commandPalette(nullptr),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this))
 {
@@ -183,6 +186,50 @@ void EditorWindow::openWelcomeTab() {
     tabWidget->setCurrentIndex(idx);
 }
 
+void EditorWindow::showCommandPalette() {
+    if (!commandPalette) {
+        commandPalette = new CommandPalette(this);
+        commandPalette->addCommand("File: New File", "Ctrl+N", [this]() { openFileInTab(""); });
+        commandPalette->addCommand("File: Open File", "Ctrl+O", [this]() {
+            QString path = QFileDialog::getOpenFileName(this, "Open File");
+            if (!path.isEmpty()) openFileInTab(path);
+        });
+        commandPalette->addCommand("File: Open Folder", "", [this]() {
+            QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder");
+            if (!dir.isEmpty() && fileBrowser) {
+                fileBrowser->setRootDirectory(dir);
+            }
+        });
+        commandPalette->addCommand("Build: Build Project", "Ctrl+B", [this]() { runBuild(); });
+        commandPalette->addCommand("AI: Refactor with AI", "", [this]() {
+            bool ok = false;
+            QString instr = QInputDialog::getText(this, "AI Refactor",
+                                                  "Describe the refactor:",
+                                                  QLineEdit::Normal,
+                                                  "", &ok);
+            if (ok && !instr.trimmed().isEmpty()) {
+                aiPatchController->setEditor(currentEditor());
+                aiPatchController->requestRefactor(instr.trimmed());
+            }
+        });
+        commandPalette->addCommand("AI: Provider Settings", "", [this]() {
+            AdminDialog dlg(this);
+            dlg.exec();
+        });
+        commandPalette->addCommand("Debugger: Start/Stop", "", [this]() {
+            if (bottomTabWidget && debugTab) {
+                bottomTabWidget->setCurrentWidget(debugTab);
+                auto* startBtn = debugTab->findChild<QPushButton*>();
+                if (startBtn) startBtn->click();
+            }
+        });
+        commandPalette->addCommand("Help: About", "", [this]() {
+            QMessageBox::about(this, "About AI-IDE", "AI-IDE\nNext-generation C++ development powered by LLVM and Local AI.");
+        });
+    }
+    commandPalette->showPalette();
+}
+
 void EditorWindow::createDocks() {
     // File Browser (Left)
     auto* fileDock = new QDockWidget("Files", this);
@@ -290,6 +337,11 @@ void EditorWindow::createMenus() {
 
     auto *helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About");
+
+    auto *paletteAction = new QAction("Command Palette", this);
+    paletteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+    connect(paletteAction, &QAction::triggered, this, &EditorWindow::showCommandPalette);
+    addAction(paletteAction);
 }
 
 void EditorWindow::runBuild() {
