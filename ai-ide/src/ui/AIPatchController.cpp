@@ -2,6 +2,8 @@
 #include "DiffView.hpp"
 #include "../ai/GeminiProvider.hpp"
 #include "../ai/OllamaProvider.hpp"
+#include "../ai/ClaudeProvider.hpp"
+#include "../ai/AntigravityProvider.hpp"
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QPushButton>
@@ -16,10 +18,15 @@ AIPatchController::AIPatchController(CustomEditor* ed, QObject* parent)
       editor(ed)
 {
     auto& settings = SettingsManager::instance();
-    if (settings.getProviderType() == "Gemini")
-        provider = std::make_unique<GeminiProvider>(settings.getEndpoint());
-    else
-        provider = std::make_unique<OllamaProvider>(settings.getEndpoint());
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 }
 
 void AIPatchController::setEditor(CustomEditor* ed) {
@@ -28,6 +35,19 @@ void AIPatchController::setEditor(CustomEditor* ed) {
 
 void AIPatchController::requestRefactor(const QString& instruction) {
     if (!editor) return;
+    
+    // Re-initialize provider on the fly based on latest settings
+    auto& settings = SettingsManager::instance();
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
+
     QString code = editor->currentFilePath().isEmpty()
         ? QString()
         : editor->findChild<QPlainTextEdit*>()->toPlainText();

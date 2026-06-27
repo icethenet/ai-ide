@@ -1,6 +1,8 @@
 #include "AIChatPanel.hpp"
 #include "../ai/GeminiProvider.hpp"
 #include "../ai/OllamaProvider.hpp"
+#include "../ai/ClaudeProvider.hpp"
+#include "../ai/AntigravityProvider.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QRegularExpression>
@@ -23,10 +25,15 @@ AIChatPanel::AIChatPanel(QWidget* parent) : QWidget(parent) {
     sendButton = new QPushButton("Send", this);
     
     auto& settings = SettingsManager::instance();
-    if (settings.getProviderType() == "Gemini")
-        provider = std::make_unique<GeminiProvider>(settings.getEndpoint());
-    else
-        provider = std::make_unique<OllamaProvider>(settings.getEndpoint());
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 
     auto* actionLayout = new QHBoxLayout();
     auto* applyBtn = new QPushButton("Apply to Editor", this);
@@ -58,6 +65,18 @@ void AIChatPanel::sendPrompt() {
 
     chatHistory->append("<b>You:</b> " + prompt);
     lastExtractedCode.clear();
+
+    // Re-initialize provider on the fly based on latest settings
+    auto& settings = SettingsManager::instance();
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 
     AIRequest req;
     req.prompt = prompt.toStdString();

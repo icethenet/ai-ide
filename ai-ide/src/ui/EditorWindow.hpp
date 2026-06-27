@@ -12,6 +12,7 @@ class WelcomeWidget;
 class AIPatchController;
 class CommandPalette;
 class ClipboardListener;
+class FindReplaceDialog;
 class QShowEvent;
 class QSplitter;
 class QListView;
@@ -29,6 +30,7 @@ class EditorWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit EditorWindow(QWidget *parent = nullptr);
+    CustomEditor* currentEditor() const;
 
 private:
     void createMenus();
@@ -36,7 +38,6 @@ private:
     void createCentralEditor();
     void showEvent(QShowEvent* event) override;
     void openFileInTab(const QString& path);
-    CustomEditor* currentEditor() const;
     void runBuild();
     void readBuildOutput();
     void buildFinished(int exitCode, int exitStatus);
@@ -72,6 +73,7 @@ private:
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
+    FindReplaceDialog* findReplaceDialog;
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;

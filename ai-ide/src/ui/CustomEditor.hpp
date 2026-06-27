@@ -16,6 +16,7 @@ public:
     void saveFile();
     void saveAsFile();
     QString currentFilePath() const;
+    CodeEditor* getCodeEditor() const { return editor; }
 
 signals:
     void fileChanged(const QString& path);

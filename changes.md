@@ -1,5 +1,56 @@
 # Build Fix Changes Report
 
+## Latest Update: AI Connections Admin, Logo, Find & Replace, and Navigation Features ✨
+
+### New Features Added
+
+1. **AI Connections & Credentials Administration**
+   - **Tabbed Admin Interface**: Redesigned settings dialog using a tabbed interface separating active profile choices from individual provider settings (Ollama, Gemini, Claude, Antigravity AI).
+   - **Credential Masking**: Hidden API Key inputs inside settings dialog to secure development credentials.
+   - **Dynamic Provider Instantiation**: Restructured Chat Panel and Patch Controller logic to dynamically initialize provider clients on every request, resolving stale state bugs when switching engines.
+   - **Antigravity AI REST emulation**: Routed Antigravity AI configurations to standard Gemini REST endpoints (defaulting to the free-tier `gemini-2.5-flash`), injecting specialized agent system instructions to act as the Antigravity developer persona (bypassing Interactions API requirements).
+   - **Stale Settings Redirection**: Added automatic safety checks to intercept any legacy `antigravity-preview-05-2026` settings in registry and redirect them to REST-supported models.
+
+2. **TLS/SSL Network Fixes**
+   - **Plugin Directory Mapping**: Configured the launcher batch script to export `QT_PLUGIN_PATH`, and added C++ initialization code inside `main.cpp` to register Qt's plugin folder. This resolves `No functional TLS backend was found` runtime network errors under MinGW.
+
+3. **Advanced Find & Replace Dialog**
+   - **Floating Dialog Widget**: Added a non-modal Find/Replace dialog floating over the editor.
+   - **Search Scope Filters**: Implemented toggles for Case Sensitivity, Whole Words, and Regular Expressions.
+   - **Multi-File Scoped Operations**: Navigates active document matches, or runs folder-wide directory searches with regex-based search/replace and confirmation prompt safeguards.
+
+4. **Enhanced File Browser Toolbar & Directory Actions**
+   - **Navigation Controls**: Added back, forward, parent folder up, and refresh actions.
+   - **Context Operations**: Right-click context menus supporting New File, New Folder, Rename, Delete (recursive directories), and Refresh.
+
+5. **Logo Integration**
+   - **Resource Bundled Icon**: Packed the logo as a compiled Qt resource and set it as the window icon.
+   - **Welcome Page & About Dialog**: Styled and positioned logo on the startup welcome screen dashboard, and added a Help About dialog.
+
+**Files Modified**:
+- `add_custom_editor_and_features.py`
+- `ai-ide/src/CMakeLists.txt`
+- `ai-ide/src/main.cpp`
+- `ai-ide/src/ai/GeminiProvider.hpp` / `.cpp`
+- `ai-ide/src/ui/AIChatPanel.cpp`
+- `ai-ide/src/ui/AIPatchController.cpp`
+- `ai-ide/src/ui/AdminDialog.hpp` / `.cpp`
+- `ai-ide/src/ui/EditorWindow.hpp` / `.cpp`
+- `ai-ide/src/ui/FileBrowser.hpp` / `.cpp`
+- `ai-ide/src/ui/SettingsManager.hpp`
+- `ai-ide/src/ui/WelcomeWidget.cpp`
+- `run-app.bat`
+
+**New Files Added**:
+- `ai-ide/src/ai/ClaudeProvider.hpp` / `.cpp`
+- `ai-ide/src/ai/AntigravityProvider.hpp` / `.cpp`
+- `ai-ide/src/ui/FindReplaceDialog.hpp` / `.cpp`
+- `ai-ide/src/resources.qrc`
+- `ai-ide/src/idelogo.png`
+- `idelogo.png`
+
+---
+
 ## Latest Update: Advanced Upgrades (Phases B, C, D, and E) ✨
 
 ### New Features Added

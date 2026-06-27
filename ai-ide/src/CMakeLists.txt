@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS *.cpp *.hpp)
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS *.cpp *.hpp *.qrc)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 

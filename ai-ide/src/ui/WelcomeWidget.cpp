@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QFrame>
+#include <QPixmap>
 
 WelcomeWidget::WelcomeWidget(QWidget* parent)
     : QWidget(parent)
@@ -23,6 +24,15 @@ WelcomeWidget::WelcomeWidget(QWidget* parent)
     auto* layout = new QVBoxLayout(container);
     layout->setContentsMargins(40, 40, 40, 40);
     layout->setAlignment(Qt::AlignCenter);
+
+    auto* logoLabel = new QLabel(this);
+    QPixmap logoPixmap(":/idelogo.png");
+    if (!logoPixmap.isNull()) {
+        logoLabel->setPixmap(logoPixmap.scaled(96, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    logoLabel->setAlignment(Qt::AlignCenter);
+    logoLabel->setStyleSheet("margin-bottom: 15px;");
+    layout->addWidget(logoLabel);
 
     auto* titleLabel = new QLabel("AI-IDE", this);
     titleLabel->setObjectName("title");

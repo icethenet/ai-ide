@@ -1,4 +1,5 @@
 import os
+import shutil
 
 ROOT = "ai-ide"
 
@@ -6,6 +7,352 @@ def write(path, content):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+# Ensure src directory exists and copy the logo to it
+os.makedirs(f"{ROOT}/src", exist_ok=True)
+shutil.copy(os.path.join(os.path.dirname(__file__), "idelogo.png"), f"{ROOT}/src/idelogo.png")
+
+# Create the Qt resource file
+write(f"{ROOT}/src/resources.qrc", r"""<!DOCTYPE RCC><RCC version="1.0">
+<qresource>
+    <file>idelogo.png</file>
+</qresource>
+</RCC>
+""")
+
+# ---------------------------------------------------------
+# AI Providers (Gemini, Claude & Antigravity)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ai/GeminiProvider.hpp", r"""#pragma once
+#include "AIProvider.hpp"
+#include <string>
+
+class GeminiProvider : public AIProvider {
+public:
+    GeminiProvider(const std::string& apiKey, const std::string& customEndpoint = "");
+    AIResponse send(const AIRequest& req) override;
+
+private:
+    std::string apiKey;
+    std::string endpoint;
+};
+""")
+
+write(f"{ROOT}/src/ai/GeminiProvider.cpp", r"""#include "GeminiProvider.hpp"
+#include <iostream>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QUrl>
+#include "../ui/SettingsManager.hpp"
+
+GeminiProvider::GeminiProvider(const std::string& key, const std::string& ep)
+    : apiKey(key), endpoint(ep)
+{
+    if (endpoint.empty()) {
+        endpoint = "https://generativelanguage.googleapis.com";
+    }
+}
+
+AIResponse GeminiProvider::send(const AIRequest& req) {
+    if (apiKey.empty()) {
+        return {"Error: Gemini API key not configured. Please set API key in settings."};
+    }
+
+    QNetworkAccessManager manager;
+    QString currentModel = QString::fromStdString(SettingsManager::instance().getModel());
+    QString modelName = (currentModel.isEmpty() || currentModel == "antigravity-preview-05-2026") ? "gemini-2.5-pro" : currentModel;
+
+    QString apiUrl = QString::fromStdString(
+        endpoint + "/v1beta/models/" + modelName.toStdString() + ":generateContent?key=" + apiKey
+    );
+    
+    QNetworkRequest request{QUrl(apiUrl)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QJsonObject content;
+    content["role"] = "user";
+    
+    QJsonObject part;
+    part["text"] = QString::fromStdString(req.prompt);
+    
+    QJsonArray parts;
+    parts.append(part);
+    content["parts"] = parts;
+    
+    QJsonArray contents;
+    contents.append(content);
+    
+    QJsonObject json;
+    json["contents"] = contents;
+    
+    QJsonObject generationConfig;
+    generationConfig["temperature"] = 0.7;
+    generationConfig["topP"] = 0.95;
+    generationConfig["maxOutputTokens"] = 8192;
+    json["generationConfig"] = generationConfig;
+
+    QNetworkReply* reply = manager.post(request, QJsonDocument(json).toJson());
+
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    AIResponse res;
+    if (reply->error() == QNetworkReply::NoError) {
+        QJsonDocument resDoc = QJsonDocument::fromJson(reply->readAll());
+        QJsonObject obj = resDoc.object();
+        
+        if (obj.contains("candidates")) {
+            QJsonArray candidates = obj["candidates"].toArray();
+            if (!candidates.isEmpty()) {
+                QJsonObject candidate = candidates[0].toObject();
+                if (candidate.contains("content")) {
+                    QJsonObject contentObj = candidate["content"].toObject();
+                    if (contentObj.contains("parts")) {
+                        QJsonArray parts = contentObj["parts"].toArray();
+                        if (!parts.isEmpty()) {
+                            QJsonObject partObj = parts[0].toObject();
+                            if (partObj.contains("text")) {
+                                res.text = partObj["text"].toString().toStdString();
+                                reply->deleteLater();
+                                return res;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (obj.contains("error")) {
+            QJsonObject error = obj["error"].toObject();
+            res.text = "Error: " + error["message"].toString().toStdString();
+        } else {
+            res.text = "Error: Invalid response format from Gemini API";
+        }
+    } else {
+        res.text = "Error: " + reply->errorString().toStdString();
+    }
+
+    reply->deleteLater();
+    return res;
+}
+""")
+write(f"{ROOT}/src/ai/ClaudeProvider.hpp", r"""#pragma once
+#include "AIProvider.hpp"
+#include <string>
+
+class ClaudeProvider : public AIProvider {
+public:
+    ClaudeProvider(const std::string& apiKey, const std::string& customEndpoint = "");
+    AIResponse send(const AIRequest& req) override;
+
+private:
+    std::string apiKey;
+    std::string endpoint;
+};
+""")
+
+write(f"{ROOT}/src/ai/ClaudeProvider.cpp", r"""#include "ClaudeProvider.hpp"
+#include <iostream>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QUrl>
+#include "../ui/SettingsManager.hpp"
+
+ClaudeProvider::ClaudeProvider(const std::string& key, const std::string& ep)
+    : apiKey(key), endpoint(ep)
+{
+    if (endpoint.empty()) {
+        endpoint = "https://api.anthropic.com";
+    }
+}
+
+AIResponse ClaudeProvider::send(const AIRequest& req) {
+    if (apiKey.empty()) {
+        return {"Error: Claude API key not configured. Please set API key in settings."};
+    }
+
+    QNetworkAccessManager manager;
+    QNetworkRequest request(QUrl(QString::fromStdString(endpoint + "/v1/messages")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("x-api-key", QByteArray::fromStdString(apiKey));
+    request.setRawHeader("anthropic-version", "2023-06-01");
+
+    QJsonObject message;
+    message["role"] = "user";
+    message["content"] = QString::fromStdString(req.prompt);
+
+    QJsonArray messages;
+    messages.append(message);
+
+    QJsonObject json;
+    QString currentModel = QString::fromStdString(SettingsManager::instance().getModel());
+    json["model"] = currentModel.isEmpty() ? "claude-3-5-sonnet-20241022" : currentModel;
+    json["max_tokens"] = 4096;
+    json["messages"] = messages;
+    json["system"] = "You are a world-class software engineer and IDE coding assistant. "
+                     "Write complete, correct, and clean code inside markdown code blocks.";
+
+    QNetworkReply* reply = manager.post(request, QJsonDocument(json).toJson());
+
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    AIResponse res;
+    if (reply->error() == QNetworkReply::NoError) {
+        QJsonDocument resDoc = QJsonDocument::fromJson(reply->readAll());
+        QJsonObject obj = resDoc.object();
+        if (obj.contains("content")) {
+            QJsonArray contentArray = obj["content"].toArray();
+            if (!contentArray.isEmpty()) {
+                QJsonObject contentObj = contentArray[0].toObject();
+                if (contentObj.contains("text")) {
+                    res.text = contentObj["text"].toString().toStdString();
+                    reply->deleteLater();
+                    return res;
+                }
+            }
+        }
+        res.text = "Error: Invalid response format from Claude API";
+    } else {
+        res.text = "Error: " + reply->errorString().toStdString();
+    }
+
+    reply->deleteLater();
+    return res;
+}
+""")
+
+write(f"{ROOT}/src/ai/AntigravityProvider.hpp", r"""#pragma once
+#include "AIProvider.hpp"
+#include <string>
+
+class AntigravityProvider : public AIProvider {
+public:
+    AntigravityProvider(const std::string& apiKey, const std::string& customEndpoint = "");
+    AIResponse send(const AIRequest& req) override;
+
+private:
+    std::string apiKey;
+    std::string endpoint;
+};
+""")
+
+write(f"{ROOT}/src/ai/AntigravityProvider.cpp", r"""#include "AntigravityProvider.hpp"
+#include <iostream>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QUrl>
+#include "../ui/SettingsManager.hpp"
+
+AntigravityProvider::AntigravityProvider(const std::string& key, const std::string& ep)
+    : apiKey(key), endpoint(ep)
+{
+    if (endpoint.empty()) {
+        endpoint = "https://generativelanguage.googleapis.com";
+    }
+}
+
+AIResponse AntigravityProvider::send(const AIRequest& req) {
+    if (apiKey.empty()) {
+        return {"Error: Antigravity API key not configured. Please set API key in settings."};
+    }
+
+    QNetworkAccessManager manager;
+    QString currentModel = QString::fromStdString(SettingsManager::instance().getModel());
+    QString modelName = (currentModel.isEmpty() || currentModel == "antigravity-preview-05-2026") ? "gemini-2.5-flash" : currentModel;
+
+    QString apiUrl = QString::fromStdString(endpoint + "/v1beta/models/" + modelName.toStdString() + ":generateContent?key=" + apiKey);
+    
+    QNetworkRequest request{QUrl(apiUrl)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QJsonObject systemInstruction;
+    QJsonObject systemPart;
+    systemPart["text"] = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding. "
+                         "You specialize in C++ Qt development, LLVM toolchains, CMake, and advanced editor structures. "
+                         "Write complete, robust, production-quality source code. "
+                         "Wrap all code blocks in markdown formatting.";
+    QJsonArray systemParts;
+    systemParts.append(systemPart);
+    systemInstruction["parts"] = systemParts;
+
+    QJsonObject content;
+    content["role"] = "user";
+    QJsonObject part;
+    part["text"] = QString::fromStdString(req.prompt);
+    QJsonArray parts;
+    parts.append(part);
+    content["parts"] = parts;
+    
+    QJsonArray contents;
+    contents.append(content);
+    
+    QJsonObject json;
+    json["contents"] = contents;
+    json["systemInstruction"] = systemInstruction;
+    
+    QJsonObject generationConfig;
+    generationConfig["temperature"] = 0.5;
+    generationConfig["maxOutputTokens"] = 8192;
+    json["generationConfig"] = generationConfig;
+
+    QNetworkReply* reply = manager.post(request, QJsonDocument(json).toJson());
+
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    AIResponse res;
+    if (reply->error() == QNetworkReply::NoError) {
+        QJsonDocument resDoc = QJsonDocument::fromJson(reply->readAll());
+        QJsonObject obj = resDoc.object();
+        
+        if (obj.contains("candidates")) {
+            QJsonArray candidates = obj["candidates"].toArray();
+            if (!candidates.isEmpty()) {
+                QJsonObject candidate = candidates[0].toObject();
+                if (candidate.contains("content")) {
+                    QJsonObject contentObj = candidate["content"].toObject();
+                    if (contentObj.contains("parts")) {
+                        QJsonArray parts = contentObj["parts"].toArray();
+                        if (!parts.isEmpty()) {
+                            QJsonObject partObj = parts[0].toObject();
+                            if (partObj.contains("text")) {
+                                res.text = partObj["text"].toString().toStdString();
+                                reply->deleteLater();
+                                return res;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        res.text = "Error: Invalid response format from Antigravity AI Engine";
+    } else {
+        res.text = "Error: " + reply->errorString().toStdString();
+    }
+
+    reply->deleteLater();
+    return res;
+}
+""")
 
 # ---------------------------------------------------------
 # Settings Manager (Singleton for App Configuration)
@@ -22,12 +369,13 @@ public:
         return inst;
     }
 
-    void setEndpoint(const std::string& ep) { 
-        endpoint = ep; 
+    // Active Profile Getters/Setters
+    void setProviderType(const std::string& type) { 
+        providerType = type; 
         QSettings s("Aide", "AI-IDE");
-        s.setValue("endpoint", QString::fromStdString(ep));
+        s.setValue("providerType", QString::fromStdString(type));
     }
-    std::string getEndpoint() const { return endpoint; }
+    std::string getProviderType() const { return providerType; }
 
     void setModel(const std::string& m) { 
         model = m; 
@@ -36,24 +384,92 @@ public:
     }
     std::string getModel() const { return model; }
 
-    void setProviderType(const std::string& type) { 
-        providerType = type; 
-        QSettings s("Aide", "AI-IDE");
-        s.setValue("providerType", QString::fromStdString(type));
+    // Legacy method for backward compatibility
+    std::string getEndpoint() const {
+        if (providerType == "Gemini") return getGeminiApiKey();
+        if (providerType == "Claude") return getClaudeApiKey();
+        if (providerType == "Antigravity AI") return getAntigravityApiKey();
+        return getOllamaEndpoint();
     }
-    std::string getProviderType() const { return providerType; }
+
+    // Ollama Config
+    void setOllamaEndpoint(const std::string& ep) {
+        ollamaEndpoint = ep;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("ollama/endpoint", QString::fromStdString(ep));
+    }
+    std::string getOllamaEndpoint() const { return ollamaEndpoint; }
+
+    // Gemini Config
+    void setGeminiApiKey(const std::string& key) {
+        geminiApiKey = key;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("gemini/apiKey", QString::fromStdString(key));
+    }
+    std::string getGeminiApiKey() const { return geminiApiKey; }
+
+    void setGeminiEndpoint(const std::string& ep) {
+        geminiEndpoint = ep;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("gemini/endpoint", QString::fromStdString(ep));
+    }
+    std::string getGeminiEndpoint() const { return geminiEndpoint; }
+
+    // Claude Config
+    void setClaudeApiKey(const std::string& key) {
+        claudeApiKey = key;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("claude/apiKey", QString::fromStdString(key));
+    }
+    std::string getClaudeApiKey() const { return claudeApiKey; }
+
+    void setClaudeEndpoint(const std::string& ep) {
+        claudeEndpoint = ep;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("claude/endpoint", QString::fromStdString(ep));
+    }
+    std::string getClaudeEndpoint() const { return claudeEndpoint; }
+
+    // Antigravity Config
+    void setAntigravityApiKey(const std::string& key) {
+        antigravityApiKey = key;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("antigravity/apiKey", QString::fromStdString(key));
+    }
+    std::string getAntigravityApiKey() const { return antigravityApiKey; }
+
+    void setAntigravityEndpoint(const std::string& ep) {
+        antigravityEndpoint = ep;
+        QSettings s("Aide", "AI-IDE");
+        s.setValue("antigravity/endpoint", QString::fromStdString(ep));
+    }
+    std::string getAntigravityEndpoint() const { return antigravityEndpoint; }
 
 private:
     SettingsManager() {
         QSettings s("Aide", "AI-IDE");
-        endpoint = s.value("endpoint", "http://localhost:11434").toString().toStdString();
-        model = s.value("model", "llama3").toString().toStdString();
         providerType = s.value("providerType", "Ollama").toString().toStdString();
+        model = s.value("model", "llama3").toString().toStdString();
+
+        ollamaEndpoint = s.value("ollama/endpoint", "http://localhost:11434").toString().toStdString();
+        geminiApiKey = s.value("gemini/apiKey", "").toString().toStdString();
+        geminiEndpoint = s.value("gemini/endpoint", "https://generativelanguage.googleapis.com").toString().toStdString();
+        claudeApiKey = s.value("claude/apiKey", "").toString().toStdString();
+        claudeEndpoint = s.value("claude/endpoint", "https://api.anthropic.com").toString().toStdString();
+        antigravityApiKey = s.value("antigravity/apiKey", "").toString().toStdString();
+        antigravityEndpoint = s.value("antigravity/endpoint", "https://generativelanguage.googleapis.com").toString().toStdString();
     }
 
-    std::string endpoint;
-    std::string model;
     std::string providerType;
+    std::string model;
+
+    std::string ollamaEndpoint;
+    std::string geminiApiKey;
+    std::string geminiEndpoint;
+    std::string claudeApiKey;
+    std::string claudeEndpoint;
+    std::string antigravityApiKey;
+    std::string antigravityEndpoint;
 };
 """)
 
@@ -73,15 +489,26 @@ private slots:
     void refreshModels();
     void saveSettings();
 private:
-    QLineEdit* endpointEdit;
     QComboBox* providerCombo;
     QComboBox* modelCombo;
+
+    QLineEdit* ollamaEndpointEdit;
+
+    QLineEdit* geminiApiKeyEdit;
+    QLineEdit* geminiEndpointEdit;
+
+    QLineEdit* claudeApiKeyEdit;
+    QLineEdit* claudeEndpointEdit;
+
+    QLineEdit* antigravityApiKeyEdit;
+    QLineEdit* antigravityEndpointEdit;
 };
 """)
 
 write(f"{ROOT}/src/ui/AdminDialog.cpp", r"""#include "AdminDialog.hpp"
 #include "SettingsManager.hpp"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QFormLayout>
 #include <QPushButton>
 #include <QNetworkAccessManager>
@@ -92,66 +519,187 @@ write(f"{ROOT}/src/ui/AdminDialog.cpp", r"""#include "AdminDialog.hpp"
 #include <QJsonArray>
 #include <QUrl>
 #include <QMessageBox>
+#include <QTabWidget>
+#include <QFrame>
 
 AdminDialog::AdminDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle("AI Settings & Administration");
-    setMinimumWidth(450);
+    setMinimumWidth(500);
+    setMinimumHeight(350);
 
-    auto* layout = new QVBoxLayout(this);
-    auto* form = new QFormLayout();
+    setStyleSheet(
+        "QDialog { background-color: #21252b; color: #abb2bf; font-family: 'Segoe UI', Arial; }"
+        "QLabel { color: #abb2bf; font-size: 12px; }"
+        "QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-size: 12px; }"
+        "QLineEdit:focus { border: 1px solid #61afef; }"
+        "QComboBox { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px; font-size: 12px; }"
+        "QTabWidget::pane { border: 1px solid #181a1f; background-color: #21252b; }"
+        "QTabBar::tab { background-color: #1e1e1e; color: #abb2bf; padding: 8px 12px; border: 1px solid #181a1f; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }"
+        "QTabBar::tab:selected { background-color: #21252b; color: #ffffff; border-bottom: 2px solid #61afef; }"
+        "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 80px; }"
+        "QPushButton:hover { background-color: #3e4452; color: #ffffff; border-color: #61afef; }"
+    );
+
+    auto* mainLayout = new QVBoxLayout(this);
+    auto* tabWidget = new QTabWidget(this);
+    auto& settings = SettingsManager::instance();
+
+    // ---------------------------------------------------------
+    // Tab 1: Active Profile
+    // ---------------------------------------------------------
+    auto* activeTab = new QWidget(this);
+    auto* activeLayout = new QFormLayout(activeTab);
+    activeLayout->setContentsMargins(15, 15, 15, 15);
+    activeLayout->setSpacing(12);
 
     providerCombo = new QComboBox(this);
-    providerCombo->addItems({"Ollama", "Gemini", "Claude"});
-    providerCombo->setCurrentText(QString::fromStdString(SettingsManager::instance().getProviderType()));
-
-    endpointEdit = new QLineEdit(this);
-    endpointEdit->setText(QString::fromStdString(SettingsManager::instance().getEndpoint()));
+    providerCombo->addItems({"Ollama", "Gemini", "Claude", "Antigravity AI"});
+    providerCombo->setCurrentText(QString::fromStdString(settings.getProviderType()));
 
     modelCombo = new QComboBox(this);
     modelCombo->setEditable(true);
-    modelCombo->setCurrentText(QString::fromStdString(SettingsManager::instance().getModel()));
+    modelCombo->setCurrentText(QString::fromStdString(settings.getModel()));
 
-    auto* refreshBtn = new QPushButton("Find Installed Models", this);
+    auto* refreshBtn = new QPushButton("Refresh Models", this);
     connect(refreshBtn, &QPushButton::clicked, this, &AdminDialog::refreshModels);
 
-    form->addRow("Provider:", providerCombo);
-    form->addRow("AI IP/Endpoint:", endpointEdit);
-    form->addRow("Current Model:", modelCombo);
+    activeLayout->addRow("Active AI Provider:", providerCombo);
+    activeLayout->addRow("Selected AI Model:", modelCombo);
     
-    auto* btnLayout = new QHBoxLayout();
-    btnLayout->addWidget(refreshBtn);
-    form->addRow("Discovery:", btnLayout);
+    auto* discoveryLayout = new QHBoxLayout();
+    discoveryLayout->addWidget(refreshBtn);
+    discoveryLayout->addStretch();
+    activeLayout->addRow("Discovery:", discoveryLayout);
 
-    layout->addLayout(form);
-    
-    auto* line = new QFrame();
-    line->setFrameShape(QFrame::HLine);
-    layout->addWidget(line);
+    tabWidget->addTab(activeTab, "Active Profile");
 
+    // ---------------------------------------------------------
+    // Tab 2: Ollama Settings
+    // ---------------------------------------------------------
+    auto* ollamaTab = new QWidget(this);
+    auto* ollamaLayout = new QFormLayout(ollamaTab);
+    ollamaLayout->setContentsMargins(15, 15, 15, 15);
+    ollamaLayout->setSpacing(12);
+
+    ollamaEndpointEdit = new QLineEdit(this);
+    ollamaEndpointEdit->setText(QString::fromStdString(settings.getOllamaEndpoint()));
+    ollamaLayout->addRow("Ollama IP/Endpoint URL:", ollamaEndpointEdit);
+
+    tabWidget->addTab(ollamaTab, "Ollama");
+
+    // ---------------------------------------------------------
+    // Tab 3: Google Gemini Settings
+    // ---------------------------------------------------------
+    auto* geminiTab = new QWidget(this);
+    auto* geminiLayout = new QFormLayout(geminiTab);
+    geminiLayout->setContentsMargins(15, 15, 15, 15);
+    geminiLayout->setSpacing(12);
+
+    geminiApiKeyEdit = new QLineEdit(this);
+    geminiApiKeyEdit->setEchoMode(QLineEdit::Password);
+    geminiApiKeyEdit->setText(QString::fromStdString(settings.getGeminiApiKey()));
+
+    geminiEndpointEdit = new QLineEdit(this);
+    geminiEndpointEdit->setText(QString::fromStdString(settings.getGeminiEndpoint()));
+
+    geminiLayout->addRow("Gemini API Key:", geminiApiKeyEdit);
+    geminiLayout->addRow("Custom Endpoint URL:", geminiEndpointEdit);
+
+    tabWidget->addTab(geminiTab, "Google Gemini");
+
+    // ---------------------------------------------------------
+    // Tab 4: Anthropic Claude Settings
+    // ---------------------------------------------------------
+    auto* claudeTab = new QWidget(this);
+    auto* claudeLayout = new QFormLayout(claudeTab);
+    claudeLayout->setContentsMargins(15, 15, 15, 15);
+    claudeLayout->setSpacing(12);
+
+    claudeApiKeyEdit = new QLineEdit(this);
+    claudeApiKeyEdit->setEchoMode(QLineEdit::Password);
+    claudeApiKeyEdit->setText(QString::fromStdString(settings.getClaudeApiKey()));
+
+    claudeEndpointEdit = new QLineEdit(this);
+    claudeEndpointEdit->setText(QString::fromStdString(settings.getClaudeEndpoint()));
+
+    claudeLayout->addRow("Claude API Key:", claudeApiKeyEdit);
+    claudeLayout->addRow("Custom Endpoint URL:", claudeEndpointEdit);
+
+    tabWidget->addTab(claudeTab, "Anthropic Claude");
+
+    // ---------------------------------------------------------
+    // Tab 5: Antigravity AI Settings
+    // ---------------------------------------------------------
+    auto* antigravityTab = new QWidget(this);
+    auto* antigravityLayout = new QFormLayout(antigravityTab);
+    antigravityLayout->setContentsMargins(15, 15, 15, 15);
+    antigravityLayout->setSpacing(12);
+
+    antigravityApiKeyEdit = new QLineEdit(this);
+    antigravityApiKeyEdit->setEchoMode(QLineEdit::Password);
+    antigravityApiKeyEdit->setText(QString::fromStdString(settings.getAntigravityApiKey()));
+
+    antigravityEndpointEdit = new QLineEdit(this);
+    antigravityEndpointEdit->setText(QString::fromStdString(settings.getAntigravityEndpoint()));
+
+    antigravityLayout->addRow("Antigravity AI Key/Code:", antigravityApiKeyEdit);
+    antigravityLayout->addRow("Custom Endpoint URL:", antigravityEndpointEdit);
+
+    tabWidget->addTab(antigravityTab, "Antigravity AI");
+
+    mainLayout->addWidget(tabWidget);
+
+    auto* buttonLayout = new QHBoxLayout();
     auto* saveBtn = new QPushButton("Save Changes", this);
+    auto* cancelBtn = new QPushButton("Cancel", this);
+
     connect(saveBtn, &QPushButton::clicked, this, &AdminDialog::saveSettings);
-    layout->addWidget(saveBtn, 0, Qt::AlignRight);
+    connect(cancelBtn, &QPushButton::clicked, this, &AdminDialog::reject);
+
+    buttonLayout->addStretch();
+    buttonLayout->addWidget(cancelBtn);
+    buttonLayout->addWidget(saveBtn);
+    mainLayout->addLayout(buttonLayout);
 }
 
 void AdminDialog::refreshModels() {
-    QString url = endpointEdit->text() + "/api/tags";
-    auto* manager = new QNetworkAccessManager(this);
-    auto* reply = manager->get(QNetworkRequest(QUrl(url)));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            modelCombo->clear();
-            auto models = QJsonDocument::fromJson(reply->readAll()).object()["models"].toArray();
-            for (const auto& m : models) modelCombo->addItem(m.toObject()["name"].toString());
-        }
-        reply->deleteLater();
-    });
+    QString provider = providerCombo->currentText();
+    if (provider == "Ollama") {
+        QString url = ollamaEndpointEdit->text() + "/api/tags";
+        auto* manager = new QNetworkAccessManager(this);
+        auto* reply = manager->get(QNetworkRequest(QUrl(url)));
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            if (reply->error() == QNetworkReply::NoError) {
+                modelCombo->clear();
+                auto models = QJsonDocument::fromJson(reply->readAll()).object()["models"].toArray();
+                for (const auto& m : models) {
+                    modelCombo->addItem(m.toObject()["name"].toString());
+                }
+            } else {
+                QMessageBox::warning(this, "Discovery Error", "Failed to connect to Ollama: " + reply->errorString());
+            }
+            reply->deleteLater();
+        });
+    } else if (provider == "Gemini" || provider == "Antigravity AI") {
+        modelCombo->clear();
+        modelCombo->addItems({"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"});
+    } else if (provider == "Claude") {
+        modelCombo->clear();
+        modelCombo->addItems({"claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"});
+    }
 }
 
 void AdminDialog::saveSettings() {
     auto& s = SettingsManager::instance();
-    s.setEndpoint(endpointEdit->text().toStdString());
     s.setProviderType(providerCombo->currentText().toStdString());
     s.setModel(modelCombo->currentText().toStdString());
+    s.setOllamaEndpoint(ollamaEndpointEdit->text().toStdString());
+    s.setGeminiApiKey(geminiApiKeyEdit->text().toStdString());
+    s.setGeminiEndpoint(geminiEndpointEdit->text().toStdString());
+    s.setClaudeApiKey(claudeApiKeyEdit->text().toStdString());
+    s.setClaudeEndpoint(claudeEndpointEdit->text().toStdString());
+    s.setAntigravityApiKey(antigravityApiKeyEdit->text().toStdString());
+    s.setAntigravityEndpoint(antigravityEndpointEdit->text().toStdString());
     accept();
 }
 """)
@@ -163,6 +711,9 @@ write(f"{ROOT}/src/ui/FileBrowser.hpp", r"""#pragma once
 #include <QWidget>
 #include <QFileSystemModel>
 #include <QTreeView>
+#include <QStringList>
+#include <QPushButton>
+#include <QModelIndex>
 
 class FileBrowser : public QWidget {
     Q_OBJECT
@@ -170,49 +721,340 @@ public:
     explicit FileBrowser(QWidget* parent = nullptr);
 
     void setRootDirectory(const QString& path);
+    QString rootPath() const { return currentRootPath; }
 
 signals:
     void fileOpened(const QString& path);
     void rootChanged(const QString& path);
+
+private slots:
+    void goBack();
+    void goForward();
+    void goUp();
+    void refreshView();
+    void createFolder();
+    void createFile();
+    void showContextMenu(const QPoint& pos);
+    void renameItem();
+    void deleteItem();
+
 private:
+    void navigateTo(const QString& path, bool recordHistory = true);
+    void updateButtonStates();
+    QString getSelectedPath() const;
+
     QFileSystemModel* model;
     QTreeView* tree;
+
+    // Navigation buttons
+    QPushButton* backBtn;
+    QPushButton* forwardBtn;
+    QPushButton* upBtn;
+    QPushButton* refreshBtn;
+    QPushButton* newFolderBtn;
+    QPushButton* newFileBtn;
+
+    // History state
+    QString currentRootPath;
+    QStringList historyBack;
+    QStringList historyForward;
 };
 """)
 
 write(f"{ROOT}/src/ui/FileBrowser.cpp", r"""#include "FileBrowser.hpp"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QFileInfo>
 #include <QDir>
 #include <QHeaderView>
+#include <QMenu>
+#include <QAction>
+#include <QInputDialog>
+#include <QMessageBox>
 
 FileBrowser::FileBrowser(QWidget* parent) : QWidget(parent) {
-    auto* layout = new QVBoxLayout(this);
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(2);
+
+    // Toolbar Layout
+    auto* toolbar = new QWidget(this);
+    toolbar->setStyleSheet(
+        "QWidget { background-color: #21252b; border-bottom: 1px solid #181a1f; }"
+        "QPushButton { background-color: transparent; border: none; color: #abb2bf; font-size: 14px; font-weight: bold; padding: 4px; border-radius: 4px; min-width: 24px; min-height: 24px; }"
+        "QPushButton:hover { background-color: #2c313c; color: #ffffff; }"
+        "QPushButton:disabled { color: #5c6370; background-color: transparent; }"
+    );
+
+    auto* tbLayout = new QHBoxLayout(toolbar);
+    tbLayout->setContentsMargins(4, 4, 4, 4);
+    tbLayout->setSpacing(4);
+
+    backBtn = new QPushButton("←", this);
+    backBtn->setToolTip("Back");
+    
+    forwardBtn = new QPushButton("→", this);
+    forwardBtn->setToolTip("Forward");
+
+    upBtn = new QPushButton("↑", this);
+    upBtn->setToolTip("Up");
+
+    refreshBtn = new QPushButton("⟳", this);
+    refreshBtn->setToolTip("Refresh");
+
+    newFolderBtn = new QPushButton("📁+", this);
+    newFolderBtn->setToolTip("New Folder");
+
+    newFileBtn = new QPushButton("📄+", this);
+    newFileBtn->setToolTip("New File");
+
+    tbLayout->addWidget(backBtn);
+    tbLayout->addWidget(forwardBtn);
+    tbLayout->addWidget(upBtn);
+    tbLayout->addWidget(refreshBtn);
+    tbLayout->addStretch();
+    tbLayout->addWidget(newFolderBtn);
+    tbLayout->addWidget(newFileBtn);
+
+    mainLayout->addWidget(toolbar);
+
     model = new QFileSystemModel(this);
+    model->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
     
     tree = new QTreeView(this);
     tree->setModel(model);
+    tree->setContextMenuPolicy(Qt::CustomContextMenu);
 
     // Improve visibility: Hide metadata columns that crowd the sidebar
     tree->setColumnHidden(1, true); // Size
     tree->setColumnHidden(2, true); // Type
     tree->setColumnHidden(3, true); // Date Modified
-    
-    // Ensure the file name column takes up the available space
     tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
 
-    setRootDirectory(QDir::currentPath());
+    mainLayout->addWidget(tree);
 
-    layout->addWidget(tree);
+    // Initial state
+    currentRootPath = QDir::currentPath();
+    setRootDirectory(currentRootPath);
+
+    // Connections
     connect(tree, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
         QString path = model->filePath(idx);
-        if (QFileInfo(path).isFile()) emit fileOpened(path);
+        if (QFileInfo(path).isFile()) {
+            emit fileOpened(path);
+        } else if (QFileInfo(path).isDir()) {
+            navigateTo(path);
+        }
     });
+
+    connect(tree, &QTreeView::customContextMenuRequested, this, &FileBrowser::showContextMenu);
+
+    connect(backBtn, &QPushButton::clicked, this, &FileBrowser::goBack);
+    connect(forwardBtn, &QPushButton::clicked, this, &FileBrowser::goForward);
+    connect(upBtn, &QPushButton::clicked, this, &FileBrowser::goUp);
+    connect(refreshBtn, &QPushButton::clicked, this, &FileBrowser::refreshView);
+    connect(newFolderBtn, &QPushButton::clicked, this, &FileBrowser::createFolder);
+    connect(newFileBtn, &QPushButton::clicked, this, &FileBrowser::createFile);
+
+    updateButtonStates();
 }
 
 void FileBrowser::setRootDirectory(const QString& path) {
-    tree->setRootIndex(model->setRootPath(path));
-    emit rootChanged(path);
+    navigateTo(path, false);
+}
+
+void FileBrowser::navigateTo(const QString& path, bool recordHistory) {
+    if (path.isEmpty() || !QFileInfo(path).isDir()) return;
+
+    QString cleanPath = QDir::cleanPath(path);
+    if (recordHistory && !currentRootPath.isEmpty() && currentRootPath != cleanPath) {
+        historyBack.push_back(currentRootPath);
+        historyForward.clear();
+    }
+
+    currentRootPath = cleanPath;
+    tree->setRootIndex(model->setRootPath(cleanPath));
+    updateButtonStates();
+    emit rootChanged(cleanPath);
+}
+
+void FileBrowser::goBack() {
+    if (!historyBack.isEmpty()) {
+        QString prev = historyBack.takeLast();
+        historyForward.push_back(currentRootPath);
+        navigateTo(prev, false);
+    }
+}
+
+void FileBrowser::goForward() {
+    if (!historyForward.isEmpty()) {
+        QString nextPath = historyForward.takeLast();
+        historyBack.push_back(currentRootPath);
+        navigateTo(nextPath, false);
+    }
+}
+
+void FileBrowser::goUp() {
+    QDir dir(currentRootPath);
+    if (dir.cdUp()) {
+        navigateTo(dir.absolutePath());
+    }
+}
+
+void FileBrowser::refreshView() {
+    model->setRootPath("");
+    model->setRootPath(currentRootPath);
+    tree->setRootIndex(model->index(currentRootPath));
+}
+
+void FileBrowser::updateButtonStates() {
+    backBtn->setEnabled(!historyBack.isEmpty());
+    forwardBtn->setEnabled(!historyForward.isEmpty());
+    
+    QDir dir(currentRootPath);
+    upBtn->setEnabled(dir.absolutePath() != dir.rootPath());
+}
+
+QString FileBrowser::getSelectedPath() const {
+    QModelIndex idx = tree->currentIndex();
+    if (idx.isValid()) {
+        return model->filePath(idx);
+    }
+    return currentRootPath;
+}
+
+void FileBrowser::createFolder() {
+    QString targetDir = getSelectedPath();
+    if (QFileInfo(targetDir).isFile()) {
+        targetDir = QFileInfo(targetDir).absolutePath();
+    }
+
+    bool ok;
+    QString name = QInputDialog::getText(this, "Create Folder",
+                                         "Folder Name:", QLineEdit::Normal,
+                                         "", &ok);
+    if (ok && !name.trimmed().isEmpty()) {
+        QDir dir(targetDir);
+        if (dir.mkdir(name.trimmed())) {
+            refreshView();
+        } else {
+            QMessageBox::warning(this, "Error", "Failed to create directory. It may already exist or you lack permissions.");
+        }
+    }
+}
+
+void FileBrowser::createFile() {
+    QString targetDir = getSelectedPath();
+    if (QFileInfo(targetDir).isFile()) {
+        targetDir = QFileInfo(targetDir).absolutePath();
+    }
+
+    bool ok;
+    QString name = QInputDialog::getText(this, "Create File",
+                                         "File Name:", QLineEdit::Normal,
+                                         "", &ok);
+    if (ok && !name.trimmed().isEmpty()) {
+        QString filePath = QDir(targetDir).filePath(name.trimmed());
+        QFile file(filePath);
+        if (file.open(QIODevice::WriteOnly)) {
+            file.close();
+            refreshView();
+            emit fileOpened(filePath);
+        } else {
+            QMessageBox::warning(this, "Error", "Failed to create file.");
+        }
+    }
+}
+
+void FileBrowser::showContextMenu(const QPoint& pos) {
+    QModelIndex idx = tree->indexAt(pos);
+    
+    QMenu menu(this);
+    menu.setStyleSheet(
+        "QMenu { background-color: #21252b; color: #abb2bf; border: 1px solid #181a1f; }"
+        "QMenu::item { padding: 6px 20px; }"
+        "QMenu::item:selected { background-color: #3e4452; color: #ffffff; }"
+    );
+
+    QAction* newFileAct = menu.addAction("New File...");
+    QAction* newFolderAct = menu.addAction("New Folder...");
+    
+    QAction* renameAct = nullptr;
+    QAction* deleteAct = nullptr;
+
+    if (idx.isValid()) {
+        menu.addSeparator();
+        renameAct = menu.addAction("Rename...");
+        deleteAct = menu.addAction("Delete");
+    }
+
+    menu.addSeparator();
+    QAction* refreshAct = menu.addAction("Refresh");
+
+    QAction* selectedAct = menu.exec(tree->viewport()->mapToGlobal(pos));
+    if (!selectedAct) return;
+
+    if (selectedAct == newFileAct) {
+        createFile();
+    } else if (selectedAct == newFolderAct) {
+        createFolder();
+    } else if (selectedAct == renameAct) {
+        renameItem();
+    } else if (selectedAct == deleteAct) {
+        deleteItem();
+    } else if (selectedAct == refreshAct) {
+        refreshView();
+    }
+}
+
+void FileBrowser::renameItem() {
+    QModelIndex idx = tree->currentIndex();
+    if (!idx.isValid()) return;
+
+    QString oldPath = model->filePath(idx);
+    QFileInfo info(oldPath);
+
+    bool ok;
+    QString newName = QInputDialog::getText(this, "Rename Item",
+                                            "New Name:", QLineEdit::Normal,
+                                            info.fileName(), &ok);
+    if (ok && !newName.trimmed().isEmpty() && newName != info.fileName()) {
+        QString newPath = info.absoluteDir().filePath(newName.trimmed());
+        if (QFile::rename(oldPath, newPath)) {
+            refreshView();
+        } else {
+            QMessageBox::warning(this, "Error", "Failed to rename item.");
+        }
+    }
+}
+
+void FileBrowser::deleteItem() {
+    QModelIndex idx = tree->currentIndex();
+    if (!idx.isValid()) return;
+
+    QString path = model->filePath(idx);
+    QFileInfo info(path);
+
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, "Confirm Delete",
+        QString("Are you sure you want to delete '%1'? This action is permanent.").arg(info.fileName()),
+        QMessageBox::Yes | QMessageBox::No
+    );
+
+    if (reply != QMessageBox::Yes) return;
+
+    bool success = false;
+    if (info.isDir()) {
+        success = QDir(path).removeRecursively();
+    } else {
+        success = QFile::remove(path);
+    }
+
+    if (success) {
+        refreshView();
+    } else {
+        QMessageBox::warning(this, "Error", "Failed to delete item.");
+    }
 }
 """)
 
@@ -247,6 +1089,8 @@ private:
 write(f"{ROOT}/src/ui/AIChatPanel.cpp", r"""#include "AIChatPanel.hpp"
 #include "../ai/GeminiProvider.hpp"
 #include "../ai/OllamaProvider.hpp"
+#include "../ai/ClaudeProvider.hpp"
+#include "../ai/AntigravityProvider.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QRegularExpression>
@@ -269,10 +1113,15 @@ AIChatPanel::AIChatPanel(QWidget* parent) : QWidget(parent) {
     sendButton = new QPushButton("Send", this);
     
     auto& settings = SettingsManager::instance();
-    if (settings.getProviderType() == "Gemini")
-        provider = std::make_unique<GeminiProvider>(settings.getEndpoint());
-    else
-        provider = std::make_unique<OllamaProvider>(settings.getEndpoint());
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 
     auto* actionLayout = new QHBoxLayout();
     auto* applyBtn = new QPushButton("Apply to Editor", this);
@@ -304,6 +1153,18 @@ void AIChatPanel::sendPrompt() {
 
     chatHistory->append("<b>You:</b> " + prompt);
     lastExtractedCode.clear();
+
+    // Re-initialize provider on the fly based on latest settings
+    auto& settings = SettingsManager::instance();
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 
     AIRequest req;
     req.prompt = prompt.toStdString();
@@ -675,6 +1536,549 @@ void CompletionPopup::setCompletions(const QJsonArray& items) {
 void CompletionPopup::showAt(const QPoint& pos) {
     move(pos);
     show();
+}
+""")
+
+# ---------------------------------------------------------
+# Find & Replace Dialog
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/FindReplaceDialog.hpp", r"""#pragma once
+#include <QDialog>
+#include <QLineEdit>
+#include <QCheckBox>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QLabel>
+#include <QString>
+
+class EditorWindow;
+
+class FindReplaceDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit FindReplaceDialog(EditorWindow* parent = nullptr);
+    void showFind();
+    void showReplace();
+    void showFolderSearch(const QString& defaultFolder);
+
+private slots:
+    void onFindNext();
+    void onFindPrev();
+    void onReplace();
+    void onReplaceAll();
+    void onBrowseFolder();
+    void onScopeChanged();
+
+private:
+    void setupUI();
+    bool doFind(bool forward);
+    void performFolderReplace();
+
+    EditorWindow* mainWin;
+
+    QLineEdit* findEdit;
+    QLineEdit* replaceEdit;
+    QLineEdit* folderEdit;
+    QLineEdit* filterEdit;
+    QPushButton* browseBtn;
+
+    QCheckBox* caseCheck;
+    QCheckBox* wordCheck;
+    QCheckBox* regexCheck;
+
+    QRadioButton* currentFileRadio;
+    QRadioButton* folderRadio;
+
+    QPushButton* findNextBtn;
+    QPushButton* findPrevBtn;
+    QPushButton* replaceBtn;
+    QPushButton* replaceAllBtn;
+
+    QLabel* statusLabel;
+};
+""")
+
+write(f"{ROOT}/src/ui/FindReplaceDialog.cpp", r"""#include "FindReplaceDialog.hpp"
+#include "EditorWindow.hpp"
+#include "CustomEditor.hpp"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
+#include <QFileDialog>
+#include <QMessageBox>
+#include <QTextDocument>
+#include <QTextCursor>
+#include <QDirIterator>
+#include <QFile>
+#include <QTextStream>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <QDir>
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+#include <QRegExp>
+#endif
+
+FindReplaceDialog::FindReplaceDialog(EditorWindow* parent)
+    : QDialog(parent), mainWin(parent)
+{
+    setWindowFlags(Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    setWindowTitle("Find & Replace");
+    resize(480, 280);
+
+    setupUI();
+    onScopeChanged();
+}
+
+void FindReplaceDialog::setupUI() {
+    // Dark modern styling matching EditorWindow
+    setStyleSheet(
+        "QDialog { background-color: #21252b; color: #abb2bf; font-family: 'Segoe UI', Arial; }"
+        "QLabel { color: #abb2bf; font-size: 12px; }"
+        "QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-size: 12px; }"
+        "QLineEdit:focus { border: 1px solid #61afef; }"
+        "QCheckBox { color: #abb2bf; font-size: 12px; }"
+        "QCheckBox::indicator { width: 14px; height: 14px; }"
+        "QRadioButton { color: #abb2bf; font-size: 12px; }"
+        "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 80px; }"
+        "QPushButton:hover { background-color: #3e4452; color: #ffffff; border-color: #61afef; }"
+        "QPushButton:pressed { background-color: #4b5263; }"
+    );
+
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(15, 15, 15, 15);
+    mainLayout->setSpacing(12);
+
+    auto* formLayout = new QFormLayout();
+    formLayout->setSpacing(8);
+
+    findEdit = new QLineEdit(this);
+    findEdit->setPlaceholderText("Text to search...");
+    formLayout->addRow("Find:", findEdit);
+
+    replaceEdit = new QLineEdit(this);
+    replaceEdit->setPlaceholderText("Replacement text...");
+    formLayout->addRow("Replace with:", replaceEdit);
+
+    // Options layout (Case sensitive, Whole word, Regex)
+    auto* optionsLayout = new QHBoxLayout();
+    caseCheck = new QCheckBox("Match Case", this);
+    wordCheck = new QCheckBox("Whole Word", this);
+    regexCheck = new QCheckBox("Regex", this);
+    optionsLayout->addWidget(caseCheck);
+    optionsLayout->addWidget(wordCheck);
+    optionsLayout->addWidget(regexCheck);
+    optionsLayout->addStretch();
+    formLayout->addRow("", optionsLayout);
+
+    // Scope layout
+    auto* scopeLayout = new QHBoxLayout();
+    currentFileRadio = new QRadioButton("Current File", this);
+    currentFileRadio->setChecked(true);
+    folderRadio = new QRadioButton("Folder/Workspace", this);
+    scopeLayout->addWidget(currentFileRadio);
+    scopeLayout->addWidget(folderRadio);
+    scopeLayout->addStretch();
+    formLayout->addRow("Scope:", scopeLayout);
+
+    // Folder and Filter layout
+    auto* folderLayout = new QHBoxLayout();
+    folderEdit = new QLineEdit(this);
+    folderEdit->setText(QDir::currentPath());
+    folderEdit->setPlaceholderText("Directory path...");
+    browseBtn = new QPushButton("Browse...", this);
+    browseBtn->setMaximumWidth(80);
+    folderLayout->addWidget(folderEdit);
+    folderLayout->addWidget(browseBtn);
+    formLayout->addRow("Directory:", folderLayout);
+
+    filterEdit = new QLineEdit(this);
+    filterEdit->setPlaceholderText("e.g. *.cpp, *.hpp, *.txt");
+    formLayout->addRow("File Filters:", filterEdit);
+
+    mainLayout->addLayout(formLayout);
+
+    // Buttons layout
+    auto* btnLayout = new QHBoxLayout();
+    findPrevBtn = new QPushButton("Find Prev", this);
+    findNextBtn = new QPushButton("Find Next", this);
+    replaceBtn = new QPushButton("Replace", this);
+    replaceAllBtn = new QPushButton("Replace All", this);
+
+    btnLayout->addWidget(findPrevBtn);
+    btnLayout->addWidget(findNextBtn);
+    btnLayout->addWidget(replaceBtn);
+    btnLayout->addWidget(replaceAllBtn);
+    mainLayout->addLayout(btnLayout);
+
+    statusLabel = new QLabel(this);
+    statusLabel->setStyleSheet("color: #98c379; font-style: italic;");
+    mainLayout->addWidget(statusLabel);
+
+    // Connect signals/slots
+    connect(browseBtn, &QPushButton::clicked, this, &FindReplaceDialog::onBrowseFolder);
+    connect(currentFileRadio, &QRadioButton::toggled, this, &FindReplaceDialog::onScopeChanged);
+    connect(folderRadio, &QRadioButton::toggled, this, &FindReplaceDialog::onScopeChanged);
+    
+    connect(findNextBtn, &QPushButton::clicked, this, &FindReplaceDialog::onFindNext);
+    connect(findPrevBtn, &QPushButton::clicked, this, &FindReplaceDialog::onFindPrev);
+    connect(replaceBtn, &QPushButton::clicked, this, &FindReplaceDialog::onReplace);
+    connect(replaceAllBtn, &QPushButton::clicked, this, &FindReplaceDialog::onReplaceAll);
+
+    // Focus on find edit initially
+    findEdit->setFocus();
+}
+
+void FindReplaceDialog::showFind() {
+    replaceEdit->setVisible(false);
+    replaceBtn->setVisible(false);
+    replaceAllBtn->setText("Find All");
+    findEdit->setFocus();
+    findEdit->selectAll();
+    show();
+    raise();
+    activateWindow();
+}
+
+void FindReplaceDialog::showReplace() {
+    replaceEdit->setVisible(true);
+    replaceBtn->setVisible(true);
+    replaceAllBtn->setText("Replace All");
+    findEdit->setFocus();
+    findEdit->selectAll();
+    show();
+    raise();
+    activateWindow();
+}
+
+void FindReplaceDialog::showFolderSearch(const QString& defaultFolder) {
+    folderRadio->setChecked(true);
+    if (!defaultFolder.isEmpty()) {
+        folderEdit->setText(defaultFolder);
+    }
+    onScopeChanged();
+    findEdit->setFocus();
+    findEdit->selectAll();
+    show();
+    raise();
+    activateWindow();
+}
+
+void FindReplaceDialog::onBrowseFolder() {
+    QString dir = QFileDialog::getExistingDirectory(this, "Select Directory to Search", folderEdit->text());
+    if (!dir.isEmpty()) {
+        folderEdit->setText(dir);
+    }
+}
+
+void FindReplaceDialog::onScopeChanged() {
+    bool isFolder = folderRadio->isChecked();
+    folderEdit->setEnabled(isFolder);
+    browseBtn->setEnabled(isFolder);
+    filterEdit->setEnabled(isFolder);
+
+    findPrevBtn->setEnabled(!isFolder);
+    replaceBtn->setEnabled(!isFolder);
+}
+
+bool FindReplaceDialog::doFind(bool forward) {
+    if (!mainWin) return false;
+    CustomEditor* activeEd = mainWin->currentEditor();
+    if (!activeEd) {
+        statusLabel->setText("No active file editor.");
+        return false;
+    }
+
+    CodeEditor* codeEd = activeEd->getCodeEditor();
+    if (!codeEd) return false;
+
+    QString query = findEdit->text();
+    if (query.isEmpty()) return false;
+
+    QTextDocument::FindFlags flags;
+    if (!forward) flags |= QTextDocument::FindBackward;
+    if (caseCheck->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+    if (wordCheck->isChecked()) flags |= QTextDocument::FindWholeWords;
+
+    bool found = false;
+    if (regexCheck->isChecked()) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+        if (!caseCheck->isChecked()) {
+            options |= QRegularExpression::CaseInsensitiveOption;
+        }
+        QRegularExpression regex(query, options);
+        if (regex.isValid()) {
+            QTextCursor foundCursor = codeEd->document()->find(regex, codeEd->textCursor(), flags);
+            if (!foundCursor.isNull()) {
+                codeEd->setTextCursor(foundCursor);
+                found = true;
+            }
+        } else {
+            statusLabel->setText("Invalid regular expression.");
+            return false;
+        }
+#else
+        QRegExp regex(query, caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive);
+        QTextCursor foundCursor = codeEd->document()->find(regex, codeEd->textCursor(), flags);
+        if (!foundCursor.isNull()) {
+            codeEd->setTextCursor(foundCursor);
+            found = true;
+        }
+#endif
+    } else {
+        found = codeEd->find(query, flags);
+    }
+
+    if (found) {
+        statusLabel->setText("Match found.");
+    } else {
+        // Wrap around search
+        QTextCursor startCursor = codeEd->textCursor();
+        if (forward) {
+            startCursor.movePosition(QTextCursor::Start);
+        } else {
+            startCursor.movePosition(QTextCursor::End);
+        }
+        
+        bool wrapFound = false;
+        if (regexCheck->isChecked()) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            QRegularExpression regex(query, caseCheck->isChecked() ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption);
+            QTextCursor foundCursor = codeEd->document()->find(regex, startCursor, flags);
+            if (!foundCursor.isNull()) {
+                codeEd->setTextCursor(foundCursor);
+                wrapFound = true;
+            }
+#else
+            QRegExp regex(query, caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive);
+            QTextCursor foundCursor = codeEd->document()->find(regex, startCursor, flags);
+            if (!foundCursor.isNull()) {
+                codeEd->setTextCursor(foundCursor);
+                wrapFound = true;
+            }
+#endif
+        } else {
+            QTextCursor wrapCursor = codeEd->document()->find(query, startCursor, flags);
+            if (!wrapCursor.isNull()) {
+                codeEd->setTextCursor(wrapCursor);
+                wrapFound = true;
+            }
+        }
+
+        if (wrapFound) {
+            statusLabel->setText("Search wrapped around.");
+            found = true;
+        } else {
+            statusLabel->setText("No match found.");
+        }
+    }
+    return found;
+}
+
+void FindReplaceDialog::onFindNext() {
+    if (folderRadio->isChecked()) {
+        statusLabel->setText("Use 'Replace All' for folder scope.");
+        return;
+    }
+    doFind(true);
+}
+
+void FindReplaceDialog::onFindPrev() {
+    doFind(false);
+}
+
+void FindReplaceDialog::onReplace() {
+    if (folderRadio->isChecked()) return;
+
+    if (!mainWin) return;
+    CustomEditor* activeEd = mainWin->currentEditor();
+    if (!activeEd) return;
+
+    CodeEditor* codeEd = activeEd->getCodeEditor();
+    if (!codeEd) return;
+
+    QTextCursor cursor = codeEd->textCursor();
+    if (cursor.hasSelection()) {
+        cursor.insertText(replaceEdit->text());
+        codeEd->setTextCursor(cursor);
+        statusLabel->setText("Replaced match.");
+    }
+    doFind(true);
+}
+
+void FindReplaceDialog::onReplaceAll() {
+    QString query = findEdit->text();
+    if (query.isEmpty()) return;
+
+    if (currentFileRadio->isChecked()) {
+        if (!mainWin) return;
+        CustomEditor* activeEd = mainWin->currentEditor();
+        if (!activeEd) return;
+
+        CodeEditor* codeEd = activeEd->getCodeEditor();
+        if (!codeEd) return;
+
+        int count = 0;
+        QTextCursor startCursor = codeEd->textCursor();
+        startCursor.movePosition(QTextCursor::Start);
+        codeEd->setTextCursor(startCursor);
+
+        codeEd->setUpdatesEnabled(false);
+
+        QTextDocument::FindFlags flags;
+        if (caseCheck->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+        if (wordCheck->isChecked()) flags |= QTextDocument::FindWholeWords;
+
+        while (true) {
+            QTextCursor foundCursor;
+            if (regexCheck->isChecked()) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                QRegularExpression regex(query, caseCheck->isChecked() ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption);
+                foundCursor = codeEd->document()->find(regex, codeEd->textCursor(), flags);
+#else
+                QRegExp regex(query, caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive);
+                foundCursor = codeEd->document()->find(regex, codeEd->textCursor(), flags);
+#endif
+            } else {
+                foundCursor = codeEd->document()->find(query, codeEd->textCursor(), flags);
+            }
+
+            if (!foundCursor.isNull()) {
+                foundCursor.insertText(replaceEdit->text());
+                codeEd->setTextCursor(foundCursor);
+                count++;
+            } else {
+                break;
+            }
+        }
+
+        codeEd->setUpdatesEnabled(true);
+        statusLabel->setText(QString("Replaced %1 occurrences in file.").arg(count));
+    } else {
+        performFolderReplace();
+    }
+}
+
+void FindReplaceDialog::performFolderReplace() {
+    QString query = findEdit->text();
+    QString replacement = replaceEdit->text();
+    QString root = folderEdit->text();
+    if (query.isEmpty() || root.isEmpty()) {
+        statusLabel->setText("Find query and directory path cannot be empty.");
+        return;
+    }
+
+    QString filterStr = filterEdit->text().trimmed();
+    QStringList filters;
+    if (!filterStr.isEmpty()) {
+        filters = filterStr.split(QRegularExpression("[,;\\s]+"), Qt::SkipEmptyParts);
+    } else {
+        filters << "*.cpp" << "*.hpp" << "*.h" << "*.txt" << "*.md" << "*.py" << "*.json" << "*.cmake";
+    }
+
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, "Confirm Replace All",
+        QString("Are you sure you want to replace all occurrences of '%1' with '%2' in folder '%3'?")
+            .arg(query).arg(replacement).arg(root),
+        QMessageBox::Yes | QMessageBox::No
+    );
+
+    if (reply != QMessageBox::Yes) {
+        statusLabel->setText("Folder replacement cancelled.");
+        return;
+    }
+
+    int filesChanged = 0;
+    int occurrencesReplaced = 0;
+
+    QDirIterator it(root, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        QString path = it.next();
+        QString cleanPath = QDir::cleanPath(path);
+        if (cleanPath.contains("/.git/") || cleanPath.contains("/build/") || cleanPath.contains("/.agents/") || cleanPath.contains("/.antigravity/")) {
+            continue;
+        }
+
+        QFileInfo info(path);
+        bool matchesFilter = false;
+        for (const QString& filter : filters) {
+            QRegularExpression filterRegex(QRegularExpression::wildcardToRegularExpression(filter));
+            if (filterRegex.match(info.fileName()).hasMatch()) {
+                matchesFilter = true;
+                break;
+            }
+        }
+        if (!matchesFilter) continue;
+
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            QString content = in.readAll();
+            file.close();
+
+            bool contentChanged = false;
+            int countInFile = 0;
+
+            if (regexCheck->isChecked()) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+                if (!caseCheck->isChecked()) {
+                    options |= QRegularExpression::CaseInsensitiveOption;
+                }
+                QRegularExpression regex(query, options);
+                
+                auto matchIterator = regex.globalMatch(content);
+                while (matchIterator.hasNext()) {
+                    matchIterator.next();
+                    countInFile++;
+                }
+
+                if (countInFile > 0) {
+                    content.replace(regex, replacement);
+                    contentChanged = true;
+                }
+#else
+                QRegExp regex(query, caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive);
+                int pos = 0;
+                while ((pos = regex.indexIn(content, pos)) != -1) {
+                    countInFile++;
+                    pos += regex.matchedLength();
+                }
+                if (countInFile > 0) {
+                    content.replace(regex, replacement);
+                    contentChanged = true;
+                }
+#endif
+            } else {
+                Qt::CaseSensitivity cs = caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+                
+                int pos = 0;
+                while ((pos = content.indexOf(query, pos, cs)) != -1) {
+                    countInFile++;
+                    pos += query.length();
+                }
+
+                if (countInFile > 0) {
+                    content.replace(query, replacement, cs);
+                    contentChanged = true;
+                }
+            }
+
+            if (contentChanged) {
+                if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                    QTextStream out(&file);
+                    out << content;
+                    file.close();
+                    filesChanged++;
+                    occurrencesReplaced += countInFile;
+                }
+            }
+        }
+    }
+
+    statusLabel->setText(QString("Replaced %1 occurrences in %2 files.").arg(occurrencesReplaced).arg(filesChanged));
+    QMessageBox::information(this, "Replace All Complete", 
+                             QString("Successfully replaced %1 occurrences in %2 files.").arg(occurrencesReplaced).arg(filesChanged));
 }
 """)
 
@@ -1318,6 +2722,7 @@ public:
     void saveFile();
     void saveAsFile();
     QString currentFilePath() const;
+    CodeEditor* getCodeEditor() const { return editor; }
 
 signals:
     void fileChanged(const QString& path);
@@ -2746,6 +4151,7 @@ write(f"{ROOT}/src/ui/WelcomeWidget.cpp", r"""#include "WelcomeWidget.hpp"
 #include <QLabel>
 #include <QPushButton>
 #include <QFrame>
+#include <QPixmap>
 
 WelcomeWidget::WelcomeWidget(QWidget* parent)
     : QWidget(parent)
@@ -2765,6 +4171,15 @@ WelcomeWidget::WelcomeWidget(QWidget* parent)
     auto* layout = new QVBoxLayout(container);
     layout->setContentsMargins(40, 40, 40, 40);
     layout->setAlignment(Qt::AlignCenter);
+
+    auto* logoLabel = new QLabel(this);
+    QPixmap logoPixmap(":/idelogo.png");
+    if (!logoPixmap.isNull()) {
+        logoLabel->setPixmap(logoPixmap.scaled(96, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    logoLabel->setAlignment(Qt::AlignCenter);
+    logoLabel->setStyleSheet("margin-bottom: 15px;");
+    layout->addWidget(logoLabel);
 
     auto* titleLabel = new QLabel("AI-IDE", this);
     titleLabel->setObjectName("title");
@@ -2919,6 +4334,8 @@ write(f"{ROOT}/src/ui/AIPatchController.cpp", r"""#include "AIPatchController.hp
 #include "DiffView.hpp"
 #include "../ai/GeminiProvider.hpp"
 #include "../ai/OllamaProvider.hpp"
+#include "../ai/ClaudeProvider.hpp"
+#include "../ai/AntigravityProvider.hpp"
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QPushButton>
@@ -2933,10 +4350,15 @@ AIPatchController::AIPatchController(CustomEditor* ed, QObject* parent)
       editor(ed)
 {
     auto& settings = SettingsManager::instance();
-    if (settings.getProviderType() == "Gemini")
-        provider = std::make_unique<GeminiProvider>(settings.getEndpoint());
-    else
-        provider = std::make_unique<OllamaProvider>(settings.getEndpoint());
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
 }
 
 void AIPatchController::setEditor(CustomEditor* ed) {
@@ -2945,6 +4367,19 @@ void AIPatchController::setEditor(CustomEditor* ed) {
 
 void AIPatchController::requestRefactor(const QString& instruction) {
     if (!editor) return;
+    
+    // Re-initialize provider on the fly based on latest settings
+    auto& settings = SettingsManager::instance();
+    if (settings.getProviderType() == "Gemini") {
+        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
+    } else if (settings.getProviderType() == "Claude") {
+        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
+    } else if (settings.getProviderType() == "Antigravity AI") {
+        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
+    } else {
+        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
+    }
+
     QString code = editor->currentFilePath().isEmpty()
         ? QString()
         : editor->findChild<QPlainTextEdit*>()->toPlainText();
@@ -3107,6 +4542,7 @@ class WelcomeWidget;
 class AIPatchController;
 class CommandPalette;
 class ClipboardListener;
+class FindReplaceDialog;
 class QShowEvent;
 class QSplitter;
 class QListView;
@@ -3124,6 +4560,7 @@ class EditorWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit EditorWindow(QWidget *parent = nullptr);
+    CustomEditor* currentEditor() const;
 
 private:
     void createMenus();
@@ -3131,7 +4568,6 @@ private:
     void createCentralEditor();
     void showEvent(QShowEvent* event) override;
     void openFileInTab(const QString& path);
-    CustomEditor* currentEditor() const;
     void runBuild();
     void readBuildOutput();
     void buildFinished(int exitCode, int exitStatus);
@@ -3167,6 +4603,7 @@ private:
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
+    FindReplaceDialog* findReplaceDialog;
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;
@@ -3190,6 +4627,7 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "AIPatchController.hpp"
 #include "AdminDialog.hpp"
 #include "ClipboardListener.hpp"
+#include "FindReplaceDialog.hpp"
 #include "TerminalWidget.hpp"
 #include "ProblemsWidget.hpp"
 #include "DebugWidget.hpp"
@@ -3203,6 +4641,8 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QUrl>
+#include <QIcon>
+#include <QPixmap>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -3251,9 +4691,11 @@ EditorWindow::EditorWindow(QWidget *parent)
       cmakeTargetCombo(nullptr),
       cmakeBuildTypeCombo(nullptr),
       clipboardListener(nullptr),
-      historyModel(new QStringListModel(this))
+      historyModel(new QStringListModel(this)),
+      findReplaceDialog(nullptr)
 {
     setWindowTitle("AI-IDE");
+    setWindowIcon(QIcon(":/idelogo.png"));
 
     // Application-wide styling (Sleek dark theme)
     setStyleSheet(
@@ -3769,11 +5211,37 @@ void EditorWindow::createMenus() {
         dlg.exec();
     });
 
+    auto *editMenu = menuBar()->addMenu("&Edit");
+    auto *findAction = editMenu->addAction("Find & Replace...", [this]() {
+        if (!findReplaceDialog) {
+            findReplaceDialog = new FindReplaceDialog(this);
+        }
+        findReplaceDialog->showReplace();
+    });
+    findAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F));
+
+    auto *folderSearchAction = editMenu->addAction("Search in Folder...", [this]() {
+        if (!findReplaceDialog) {
+            findReplaceDialog = new FindReplaceDialog(this);
+        }
+        findReplaceDialog->showFolderSearch(QDir::currentPath());
+    });
+    folderSearchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+
     auto *buildMenu = menuBar()->addMenu("&Build");
     buildMenu->addAction("Build Project", QKeySequence(Qt::CTRL | Qt::Key_B), this, &EditorWindow::runBuild);
 
     auto *helpMenu = menuBar()->addMenu("&Help");
-    helpMenu->addAction("About");
+    helpMenu->addAction("About", [this]() {
+        QMessageBox msgBox(this);
+        msgBox.setWindowTitle("About AI-IDE");
+        msgBox.setText("<h3>AI-IDE v1.0</h3><p>Next-generation C++ development powered by LLVM and Local AI.</p>");
+        QPixmap logo(":/idelogo.png");
+        if (!logo.isNull()) {
+            msgBox.setIconPixmap(logo.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+        msgBox.exec();
+    });
 
     auto *paletteAction = new QAction("Command Palette", this);
     paletteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
@@ -4022,6 +5490,7 @@ write(f"{ROOT}/src/main.cpp", r"""#include <QApplication>
 #include "ui/EditorWindow.hpp"
 
 int main(int argc, char *argv[]) {
+    QApplication::addLibraryPath("C:/Qt/6.11.1/llvm-mingw_64/plugins");
     QApplication app(argc, argv);
     EditorWindow w;
     w.show();
@@ -4043,7 +5512,7 @@ add_subdirectory(src)
 
 write(f"{ROOT}/src/CMakeLists.txt", r"""cmake_minimum_required(VERSION 3.16)
 
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS *.cpp *.hpp)
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS *.cpp *.hpp *.qrc)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 

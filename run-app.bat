@@ -9,6 +9,7 @@ set BUILD_DIR=D:\Desktop\Aide\ai-ide\build\src
 
 REM Add Qt bin to PATH so DLLs are found
 set PATH=!QT_PATH!\bin;!BUILD_DIR!;!PATH!
+set QT_PLUGIN_PATH=!QT_PATH!\plugins
 
 REM Run the executable
 echo Launching AI-IDE...

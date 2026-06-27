@@ -11,7 +11,17 @@ private slots:
     void refreshModels();
     void saveSettings();
 private:
-    QLineEdit* endpointEdit;
     QComboBox* providerCombo;
     QComboBox* modelCombo;
+
+    QLineEdit* ollamaEndpointEdit;
+
+    QLineEdit* geminiApiKeyEdit;
+    QLineEdit* geminiEndpointEdit;
+
+    QLineEdit* claudeApiKeyEdit;
+    QLineEdit* claudeEndpointEdit;
+
+    QLineEdit* antigravityApiKeyEdit;
+    QLineEdit* antigravityEndpointEdit;
 };

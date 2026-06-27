@@ -1,4 +1,4 @@
-#include "GeminiProvider.hpp"
+#include "AntigravityProvider.hpp"
 #include <iostream>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -10,7 +10,7 @@
 #include <QUrl>
 #include "../ui/SettingsManager.hpp"
 
-GeminiProvider::GeminiProvider(const std::string& key, const std::string& ep)
+AntigravityProvider::AntigravityProvider(const std::string& key, const std::string& ep)
     : apiKey(key), endpoint(ep)
 {
     if (endpoint.empty()) {
@@ -18,28 +18,34 @@ GeminiProvider::GeminiProvider(const std::string& key, const std::string& ep)
     }
 }
 
-AIResponse GeminiProvider::send(const AIRequest& req) {
+AIResponse AntigravityProvider::send(const AIRequest& req) {
     if (apiKey.empty()) {
-        return {"Error: Gemini API key not configured. Please set API key in settings."};
+        return {"Error: Antigravity API key not configured. Please set API key in settings."};
     }
 
     QNetworkAccessManager manager;
     QString currentModel = QString::fromStdString(SettingsManager::instance().getModel());
-    QString modelName = (currentModel.isEmpty() || currentModel == "antigravity-preview-05-2026") ? "gemini-2.5-pro" : currentModel;
+    QString modelName = (currentModel.isEmpty() || currentModel == "antigravity-preview-05-2026") ? "gemini-2.5-flash" : currentModel;
 
-    QString apiUrl = QString::fromStdString(
-        endpoint + "/v1beta/models/" + modelName.toStdString() + ":generateContent?key=" + apiKey
-    );
+    QString apiUrl = QString::fromStdString(endpoint + "/v1beta/models/" + modelName.toStdString() + ":generateContent?key=" + apiKey);
     
     QNetworkRequest request{QUrl(apiUrl)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
+    QJsonObject systemInstruction;
+    QJsonObject systemPart;
+    systemPart["text"] = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding. "
+                         "You specialize in C++ Qt development, LLVM toolchains, CMake, and advanced editor structures. "
+                         "Write complete, robust, production-quality source code. "
+                         "Wrap all code blocks in markdown formatting.";
+    QJsonArray systemParts;
+    systemParts.append(systemPart);
+    systemInstruction["parts"] = systemParts;
+
     QJsonObject content;
     content["role"] = "user";
-    
     QJsonObject part;
     part["text"] = QString::fromStdString(req.prompt);
-    
     QJsonArray parts;
     parts.append(part);
     content["parts"] = parts;
@@ -49,10 +55,10 @@ AIResponse GeminiProvider::send(const AIRequest& req) {
     
     QJsonObject json;
     json["contents"] = contents;
+    json["systemInstruction"] = systemInstruction;
     
     QJsonObject generationConfig;
-    generationConfig["temperature"] = 0.7;
-    generationConfig["topP"] = 0.95;
+    generationConfig["temperature"] = 0.5;
     generationConfig["maxOutputTokens"] = 8192;
     json["generationConfig"] = generationConfig;
 
@@ -87,13 +93,7 @@ AIResponse GeminiProvider::send(const AIRequest& req) {
                 }
             }
         }
-        
-        if (obj.contains("error")) {
-            QJsonObject error = obj["error"].toObject();
-            res.text = "Error: " + error["message"].toString().toStdString();
-        } else {
-            res.text = "Error: Invalid response format from Gemini API";
-        }
+        res.text = "Error: Invalid response format from Antigravity AI Engine";
     } else {
         res.text = "Error: " + reply->errorString().toStdString();
     }

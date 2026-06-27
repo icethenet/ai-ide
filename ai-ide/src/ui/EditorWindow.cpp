@@ -6,6 +6,7 @@
 #include "AIPatchController.hpp"
 #include "AdminDialog.hpp"
 #include "ClipboardListener.hpp"
+#include "FindReplaceDialog.hpp"
 #include "TerminalWidget.hpp"
 #include "ProblemsWidget.hpp"
 #include "DebugWidget.hpp"
@@ -19,6 +20,8 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QUrl>
+#include <QIcon>
+#include <QPixmap>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -67,9 +70,11 @@ EditorWindow::EditorWindow(QWidget *parent)
       cmakeTargetCombo(nullptr),
       cmakeBuildTypeCombo(nullptr),
       clipboardListener(nullptr),
-      historyModel(new QStringListModel(this))
+      historyModel(new QStringListModel(this)),
+      findReplaceDialog(nullptr)
 {
     setWindowTitle("AI-IDE");
+    setWindowIcon(QIcon(":/idelogo.png"));
 
     // Application-wide styling (Sleek dark theme)
     setStyleSheet(
@@ -585,11 +590,37 @@ void EditorWindow::createMenus() {
         dlg.exec();
     });
 
+    auto *editMenu = menuBar()->addMenu("&Edit");
+    auto *findAction = editMenu->addAction("Find & Replace...", [this]() {
+        if (!findReplaceDialog) {
+            findReplaceDialog = new FindReplaceDialog(this);
+        }
+        findReplaceDialog->showReplace();
+    });
+    findAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F));
+
+    auto *folderSearchAction = editMenu->addAction("Search in Folder...", [this]() {
+        if (!findReplaceDialog) {
+            findReplaceDialog = new FindReplaceDialog(this);
+        }
+        findReplaceDialog->showFolderSearch(QDir::currentPath());
+    });
+    folderSearchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+
     auto *buildMenu = menuBar()->addMenu("&Build");
     buildMenu->addAction("Build Project", QKeySequence(Qt::CTRL | Qt::Key_B), this, &EditorWindow::runBuild);
 
     auto *helpMenu = menuBar()->addMenu("&Help");
-    helpMenu->addAction("About");
+    helpMenu->addAction("About", [this]() {
+        QMessageBox msgBox(this);
+        msgBox.setWindowTitle("About AI-IDE");
+        msgBox.setText("<h3>AI-IDE v1.0</h3><p>Next-generation C++ development powered by LLVM and Local AI.</p>");
+        QPixmap logo(":/idelogo.png");
+        if (!logo.isNull()) {
+            msgBox.setIconPixmap(logo.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+        msgBox.exec();
+    });
 
     auto *paletteAction = new QAction("Command Palette", this);
     paletteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));

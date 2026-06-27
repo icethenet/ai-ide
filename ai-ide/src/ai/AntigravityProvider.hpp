@@ -2,9 +2,9 @@
 #include "AIProvider.hpp"
 #include <string>
 
-class GeminiProvider : public AIProvider {
+class AntigravityProvider : public AIProvider {
 public:
-    GeminiProvider(const std::string& apiKey, const std::string& customEndpoint = "");
+    AntigravityProvider(const std::string& apiKey, const std::string& customEndpoint = "");
     AIResponse send(const AIRequest& req) override;
 
 private:
