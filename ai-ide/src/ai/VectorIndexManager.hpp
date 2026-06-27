@@ -23,6 +23,8 @@ public:
     bool isIndexing() const;
 
     QVector<SearchResult> search(const QString& queryText, float threshold = 0.5f);
+    
+    QSqlDatabase getDbForCurrentThread();
 
 signals:
     void indexingProgress(int current, int total);
@@ -33,7 +35,6 @@ private:
     ~VectorIndexManager();
 
     void initDb();
-    QSqlDatabase db;
     bool m_indexing = false;
     QMutex mutex;
 };

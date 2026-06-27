@@ -15,6 +15,7 @@
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDir>
+#include <QCoreApplication>
 #include <cmath>
 #include <iostream>
 
@@ -31,21 +32,31 @@ VectorIndexManager::~VectorIndexManager() {
     stopIndexing();
 }
 
-void VectorIndexManager::initDb() {
-    if (QSqlDatabase::contains("vector_connection")) {
-        db = QSqlDatabase::database("vector_connection");
-    } else {
-        db = QSqlDatabase::addDatabase("QSQLITE", "vector_connection");
+QSqlDatabase VectorIndexManager::getDbForCurrentThread() {
+    QString connectionName = "vector_connection";
+    if (QThread::currentThread() != qApp->thread()) {
+        connectionName = QString("vector_connection_thread_%1").arg(quintptr(QThread::currentThreadId()));
     }
-    QDir().mkpath(".antigravity");
-    db.setDatabaseName(".antigravity/vector_index.db");
     
-    if (!db.open()) {
-        std::cerr << "[VectorIndex] Failed to open SQLite vector index db: " 
-                  << db.lastError().text().toStdString() << std::endl;
-        return;
+    QSqlDatabase threadDb;
+    if (QSqlDatabase::contains(connectionName)) {
+        threadDb = QSqlDatabase::database(connectionName);
+    } else {
+        threadDb = QSqlDatabase::addDatabase("QSQLITE", connectionName);
+        QDir().mkpath(".antigravity");
+        threadDb.setDatabaseName(".antigravity/vector_index.db");
     }
+    
+    if (!threadDb.isOpen()) {
+        if (!threadDb.open()) {
+            std::cerr << "[VectorIndex] Failed to open database: " << threadDb.lastError().text().toStdString() << std::endl;
+        }
+    }
+    return threadDb;
+}
 
+void VectorIndexManager::initDb() {
+    QSqlDatabase db = getDbForCurrentThread();
     QSqlQuery q(db);
     bool ok = q.exec(
         "CREATE TABLE IF NOT EXISTS codebase_embeddings ("
@@ -83,7 +94,7 @@ void VectorIndexManager::startIndexing(const QString& rootPath) {
 }
 
 void VectorIndexManager::stopIndexing() {
-    // Handled by workers
+    // Handled by worker checks
 }
 
 bool VectorIndexManager::isIndexing() const {
@@ -116,7 +127,7 @@ static QVector<float> queryEmbedding(const QString& text) {
         if (key.isEmpty()) key = QString::fromStdString(settings.getAntigravityApiKey());
         if (key.isEmpty()) key = QString::fromStdString(settings.getClaudeApiKey());
 
-        apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + key;
+        apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=" + key;
         
         QJsonObject contentPart;
         contentPart["text"] = text;
@@ -125,7 +136,7 @@ static QVector<float> queryEmbedding(const QString& text) {
         QJsonObject contentObj;
         contentObj["parts"] = partsArray;
 
-        json["model"] = "models/text-embedding-004";
+        json["model"] = "models/gemini-embedding-2";
         json["content"] = contentObj;
     } else {
         QString endpoint = QString::fromStdString(settings.getOllamaEndpoint());
@@ -161,6 +172,9 @@ static QVector<float> queryEmbedding(const QString& text) {
                 for (const auto& v : values) vec.append(v.toDouble());
             }
         }
+    } else {
+        std::cerr << "[VectorIndex] Network error: " << reply->errorString().toStdString() << " (Code: " << reply->error() << ")" << std::endl;
+        std::cerr << "[VectorIndex] Error payload: " << reply->readAll().toStdString() << std::endl;
     }
     reply->deleteLater();
     return vec;
@@ -175,6 +189,7 @@ QVector<SearchResult> VectorIndexManager::search(const QString& queryText, float
         return results;
     }
 
+    QSqlDatabase db = getDbForCurrentThread();
     QSqlQuery query(db);
     query.exec("SELECT file_path, start_line, chunk_text, embedding FROM codebase_embeddings");
     while (query.next()) {
@@ -211,14 +226,7 @@ IndexWorker::IndexWorker(const QString& rootPath, QObject* parent)
 void IndexWorker::run() {
     if (root.isEmpty()) return;
 
-    QSqlDatabase threadDb;
-    if (QSqlDatabase::contains("thread_connection")) {
-        threadDb = QSqlDatabase::database("thread_connection");
-    } else {
-        threadDb = QSqlDatabase::addDatabase("QSQLITE", "thread_connection");
-    }
-    threadDb.setDatabaseName(".antigravity/vector_index.db");
-    if (!threadDb.open()) return;
+    QSqlDatabase threadDb = VectorIndexManager::instance().getDbForCurrentThread();
 
     QStringList files;
     QDirIterator it(root, QDir::Files, QDirIterator::Subdirectories);
