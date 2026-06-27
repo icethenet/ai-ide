@@ -173,6 +173,7 @@ public:
 
 signals:
     void fileOpened(const QString& path);
+    void rootChanged(const QString& path);
 private:
     QFileSystemModel* model;
     QTreeView* tree;
@@ -212,6 +213,7 @@ FileBrowser::FileBrowser(QWidget* parent) : QWidget(parent) {
 void FileBrowser::setRootDirectory(const QString& path) {
     model->setRootPath(path);
     tree->setRootIndex(model->index(path));
+    emit rootChanged(path);
 }
 """)
 
@@ -500,26 +502,21 @@ void CppHighlighter::highlightBlock(const QString& text) {
 # Command Palette (Fuzzy command search)
 # ---------------------------------------------------------
 write(f"{ROOT}/src/ui/CommandPalette.hpp", r"""#pragma once
-#include <QDialog>
-#include <QLineEdit>
+#include <QWidget>
 #include <QListWidget>
 #include <vector>
 #include <functional>
 
-class CommandPalette : public QDialog {
+class CommandPalette : public QWidget {
     Q_OBJECT
 public:
     explicit CommandPalette(QWidget* parent = nullptr);
 
     void addCommand(const QString& name, const QString& shortcut, const std::function<void()>& action);
-    void showPalette();
-
-protected:
-    bool eventFilter(QObject* obj, QEvent* event) override;
-
-private slots:
     void filterCommands(const QString& text);
-    void executeSelected();
+    void selectNext();
+    void selectPrev();
+    void executeCurrent();
 
 private:
     struct PaletteCommand {
@@ -528,58 +525,36 @@ private:
         std::function<void()> action;
     };
     std::vector<PaletteCommand> commands;
-
-    QLineEdit* searchEdit;
     QListWidget* listWidget;
 };
 """)
 
 write(f"{ROOT}/src/ui/CommandPalette.cpp", r"""#include "CommandPalette.hpp"
 #include <QVBoxLayout>
-#include <QKeyEvent>
 #include <QVariant>
 
 CommandPalette::CommandPalette(QWidget* parent)
-    : QDialog(parent, Qt::FramelessWindowHint | Qt::Popup)
+    : QWidget(parent, Qt::FramelessWindowHint | Qt::Popup)
 {
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setFocusPolicy(Qt::NoFocus);
+    
     setMinimumWidth(550);
-    setMaximumHeight(350);
-    setStyleSheet("QDialog { background-color: #21252b; border: 1px solid #3e4452; border-radius: 8px; }"
-                  "QLineEdit { background-color: #2c313c; color: #ffffff; border: 1px solid #181a1f; border-radius: 4px; padding: 8px; font-size: 14px; font-family: 'Segoe UI', Arial; }"
+    setMaximumHeight(250);
+    setStyleSheet("QWidget { background-color: #21252b; border: 1px solid #3e4452; border-radius: 8px; }"
                   "QListWidget { background-color: #21252b; color: #abb2bf; border: none; font-size: 13px; font-family: 'Segoe UI', Arial; }"
                   "QListWidget::item { padding: 10px; border-bottom: 1px solid #2c313c; border-radius: 4px; }"
                   "QListWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
 
     auto* layout = new QVBoxLayout(this);
-    searchEdit = new QLineEdit(this);
-    searchEdit->setPlaceholderText("Type a command to search...");
-    layout->addWidget(searchEdit);
-
+    layout->setContentsMargins(2, 2, 2, 2);
     listWidget = new QListWidget(this);
+    listWidget->setFocusPolicy(Qt::NoFocus);
     layout->addWidget(listWidget);
-
-    connect(searchEdit, &QLineEdit::textChanged, this, &CommandPalette::filterCommands);
-    connect(listWidget, &QListWidget::itemActivated, this, &CommandPalette::executeSelected);
-
-    searchEdit->installEventFilter(this);
 }
 
 void CommandPalette::addCommand(const QString& name, const QString& shortcut, const std::function<void()>& action) {
     commands.push_back({name, shortcut, action});
-}
-
-void CommandPalette::showPalette() {
-    searchEdit->clear();
-    filterCommands("");
-    
-    if (parentWidget()) {
-        QPoint center = parentWidget()->rect().center();
-        QPoint pos(center.x() - width() / 2, parentWidget()->rect().top() + 50);
-        move(parentWidget()->mapToGlobal(pos));
-    }
-    
-    show();
-    searchEdit->setFocus();
 }
 
 void CommandPalette::filterCommands(const QString& text) {
@@ -600,7 +575,21 @@ void CommandPalette::filterCommands(const QString& text) {
     }
 }
 
-void CommandPalette::executeSelected() {
+void CommandPalette::selectNext() {
+    int row = listWidget->currentRow();
+    if (row < listWidget->count() - 1) {
+        listWidget->setCurrentRow(row + 1);
+    }
+}
+
+void CommandPalette::selectPrev() {
+    int row = listWidget->currentRow();
+    if (row > 0) {
+        listWidget->setCurrentRow(row - 1);
+    }
+}
+
+void CommandPalette::executeCurrent() {
     auto* item = listWidget->currentItem();
     if (item) {
         int idx = item->data(Qt::UserRole).toInt();
@@ -608,33 +597,7 @@ void CommandPalette::executeSelected() {
             commands[idx].action();
         }
     }
-    accept();
-}
-
-bool CommandPalette::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == searchEdit && event->type() == QEvent::KeyPress) {
-        auto* keyEvent = static_cast<QKeyEvent*>(event);
-        if (keyEvent->key() == Qt::Key_Down) {
-            int row = listWidget->currentRow();
-            if (row < listWidget->count() - 1) {
-                listWidget->setCurrentRow(row + 1);
-            }
-            return true;
-        } else if (keyEvent->key() == Qt::Key_Up) {
-            int row = listWidget->currentRow();
-            if (row > 0) {
-                listWidget->setCurrentRow(row - 1);
-            }
-            return true;
-        } else if (keyEvent->key() == Qt::Key_Enter || keyEvent->key() == Qt::Key_Return) {
-            executeSelected();
-            return true;
-        } else if (keyEvent->key() == Qt::Key_Escape) {
-            reject();
-            return true;
-        }
-    }
-    return QDialog::eventFilter(obj, event);
+    hide();
 }
 """)
 
@@ -1918,6 +1881,7 @@ class QProcess;
 class TerminalWidget;
 class ProblemsWidget;
 class DebugWidget;
+class QLineEdit;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -1938,6 +1902,7 @@ private:
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
     void showCommandPalette();
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -1955,6 +1920,8 @@ private:
     FileBrowser* fileBrowser;
     AIPatchController* aiPatchController;
     CommandPalette* commandPalette;
+    QLineEdit* pathLineEdit;
+    QLineEdit* cmdLineEdit;
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
@@ -1975,8 +1942,6 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "WelcomeWidget.hpp"
 #include "CommandPalette.hpp"
 
-#include <QRegularExpression>
-
 #include <QMenuBar>
 #include <QDockWidget>
 #include <QListView>
@@ -1989,6 +1954,11 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include <QFileDialog>
 #include <QShowEvent>
 #include <QTimer>
+#include <QMessageBox>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QStatusBar>
 #include <QStringListModel>
 #include <QTextBlock>
@@ -2011,6 +1981,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       fileBrowser(nullptr),
       aiPatchController(nullptr),
       commandPalette(nullptr),
+      pathLineEdit(nullptr),
+      cmdLineEdit(nullptr),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this))
 {
@@ -2043,12 +2015,83 @@ void EditorWindow::showEvent(QShowEvent* event) {
     }
 }
 void EditorWindow::createCentralEditor() {
+    // Top Control Bar
+    auto* topControlBar = new QWidget(this);
+    topControlBar->setStyleSheet("QWidget { background-color: #21252b; border-bottom: 1px solid #181a1f; }");
+    auto* topLayout = new QHBoxLayout(topControlBar);
+    topLayout->setContentsMargins(10, 4, 10, 4);
+    topLayout->setSpacing(20);
+
+    // Left half: Path/Folder Browser
+    auto* leftLayout = new QHBoxLayout();
+    leftLayout->setSpacing(5);
+    
+    auto* browseBtn = new QPushButton("Browse...", this);
+    browseBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; }"
+                             "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+    
+    pathLineEdit = new QLineEdit(this);
+    pathLineEdit->setPlaceholderText("Enter folder or file path to browse...");
+    pathLineEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; }");
+    
+    leftLayout->addWidget(pathLineEdit, 1);
+    leftLayout->addWidget(browseBtn);
+    topLayout->addLayout(leftLayout, 1);
+
+    // Right half: Command line edit
+    cmdLineEdit = new QLineEdit(this);
+    cmdLineEdit->setPlaceholderText("Type command (Ctrl+Shift+P)...");
+    cmdLineEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; }");
+    topLayout->addWidget(cmdLineEdit, 1);
+
+    // Path line edit triggers
+    connect(pathLineEdit, &QLineEdit::returnPressed, this, [this]() {
+        QString path = pathLineEdit->text().trimmed();
+        if (!path.isEmpty()) {
+            QFileInfo info(path);
+            if (info.isDir()) {
+                if (fileBrowser) fileBrowser->setRootDirectory(path);
+            } else {
+                openFileInTab(path);
+            }
+        }
+    });
+
+    connect(browseBtn, &QPushButton::clicked, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder", pathLineEdit->text());
+        if (!dir.isEmpty()) {
+            pathLineEdit->setText(dir);
+            if (fileBrowser) fileBrowser->setRootDirectory(dir);
+        }
+    });
+
+    // Command line edit event filtering and connections
+    cmdLineEdit->installEventFilter(this);
+    connect(cmdLineEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
+        if (commandPalette) {
+            if (!commandPalette->isVisible()) showCommandPalette();
+            commandPalette->filterCommands(text);
+        }
+    });
+
     tabWidget = new QTabWidget(this);
     tabWidget->setTabsClosable(true);
     connect(tabWidget, &QTabWidget::tabCloseRequested, this, [this](int index) {
         QWidget* w = tabWidget->widget(index);
         tabWidget->removeTab(index);
         if (w) w->deleteLater();
+    });
+
+    // Synchronize pathLineEdit with active tab changes
+    connect(tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
+        if (index != -1) {
+            auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(index));
+            if (ed) {
+                pathLineEdit->setText(ed->currentFilePath());
+            } else {
+                pathLineEdit->setText("Welcome Page");
+            }
+        }
     });
 
     bottomTabWidget = new QTabWidget(this);
@@ -2067,11 +2110,10 @@ void EditorWindow::createCentralEditor() {
         if (QFile::exists(candidate)) { bashExe = candidate; break; }
     }
     if (bashExe.isEmpty()) {
-        // Fallback: check if wsl.exe exists (WSL Bash)
         if (QFile::exists("C:/Windows/System32/wsl.exe")) {
             bashExe = "C:/Windows/System32/wsl.exe";
         } else {
-            bashExe = "powershell.exe"; // Last resort: use PS if no bash found
+            bashExe = "powershell.exe";
         }
     }
     bashTab = new TerminalWidget(bashExe, this);
@@ -2106,7 +2148,14 @@ void EditorWindow::createCentralEditor() {
     mainSplitter->setStretchFactor(0, 3);
     mainSplitter->setStretchFactor(1, 1);
 
-    setCentralWidget(mainSplitter);
+    auto* container = new QWidget(this);
+    auto* containerLayout = new QVBoxLayout(container);
+    containerLayout->setContentsMargins(0, 0, 0, 0);
+    containerLayout->setSpacing(0);
+    containerLayout->addWidget(topControlBar);
+    containerLayout->addWidget(mainSplitter);
+
+    setCentralWidget(container);
 }
 
 void EditorWindow::openFileInTab(const QString& path) {
@@ -2120,6 +2169,8 @@ void EditorWindow::openFileInTab(const QString& path) {
             newEditor->deleteLater();
         }
     });
+
+    if (pathLineEdit) pathLineEdit->setText(path);
 
     QString title = path.isEmpty() ? "Untitled" : QFileInfo(path).fileName();
     int idx = tabWidget->addTab(newEditor, title);
@@ -2190,7 +2241,50 @@ void EditorWindow::showCommandPalette() {
             QMessageBox::about(this, "About AI-IDE", "AI-IDE\nNext-generation C++ development powered by LLVM and Local AI.");
         });
     }
-    commandPalette->showPalette();
+    
+    if (cmdLineEdit) {
+        commandPalette->filterCommands(cmdLineEdit->text());
+        QPoint pos = cmdLineEdit->mapToGlobal(QPoint(0, cmdLineEdit->height()));
+        commandPalette->setGeometry(pos.x(), pos.y(), cmdLineEdit->width(), 200);
+        commandPalette->show();
+        cmdLineEdit->setFocus();
+    }
+}
+
+bool EditorWindow::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == cmdLineEdit) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            if (commandPalette && commandPalette->isVisible()) {
+                if (keyEvent->key() == Qt::Key_Down) {
+                    commandPalette->selectNext();
+                    return true;
+                } else if (keyEvent->key() == Qt::Key_Up) {
+                    commandPalette->selectPrev();
+                    return true;
+                } else if (keyEvent->key() == Qt::Key_Enter || keyEvent->key() == Qt::Key_Return) {
+                    commandPalette->executeCurrent();
+                    cmdLineEdit->clear();
+                    return true;
+                } else if (keyEvent->key() == Qt::Key_Escape) {
+                    commandPalette->hide();
+                    return true;
+                }
+            } else if (keyEvent->key() == Qt::Key_Down || keyEvent->key() == Qt::Key_Up) {
+                showCommandPalette();
+                return true;
+            }
+        } else if (event->type() == QEvent::FocusIn) {
+            showCommandPalette();
+        } else if (event->type() == QEvent::FocusOut) {
+            QTimer::singleShot(200, this, [this]() {
+                if (commandPalette && !cmdLineEdit->hasFocus()) {
+                    commandPalette->hide();
+                }
+            });
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 void EditorWindow::createDocks() {
@@ -2203,6 +2297,10 @@ void EditorWindow::createDocks() {
 
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
         openFileInTab(path);
+    });
+
+    connect(fileBrowser, &FileBrowser::rootChanged, this, [this](const QString& path) {
+        if (pathLineEdit) pathLineEdit->setText(path);
     });
 
     // AI Chat (Right)

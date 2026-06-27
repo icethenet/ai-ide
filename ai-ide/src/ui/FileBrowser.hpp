@@ -12,6 +12,7 @@ public:
 
 signals:
     void fileOpened(const QString& path);
+    void rootChanged(const QString& path);
 private:
     QFileSystemModel* model;
     QTreeView* tree;

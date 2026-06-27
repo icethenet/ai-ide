@@ -18,6 +18,7 @@ class QProcess;
 class TerminalWidget;
 class ProblemsWidget;
 class DebugWidget;
+class QLineEdit;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -38,6 +39,7 @@ private:
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
     void showCommandPalette();
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -55,6 +57,8 @@ private:
     FileBrowser* fileBrowser;
     AIPatchController* aiPatchController;
     CommandPalette* commandPalette;
+    QLineEdit* pathLineEdit;
+    QLineEdit* cmdLineEdit;
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;

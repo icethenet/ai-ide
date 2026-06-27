@@ -1,24 +1,19 @@
 #pragma once
-#include <QDialog>
-#include <QLineEdit>
+#include <QWidget>
 #include <QListWidget>
 #include <vector>
 #include <functional>
 
-class CommandPalette : public QDialog {
+class CommandPalette : public QWidget {
     Q_OBJECT
 public:
     explicit CommandPalette(QWidget* parent = nullptr);
 
     void addCommand(const QString& name, const QString& shortcut, const std::function<void()>& action);
-    void showPalette();
-
-protected:
-    bool eventFilter(QObject* obj, QEvent* event) override;
-
-private slots:
     void filterCommands(const QString& text);
-    void executeSelected();
+    void selectNext();
+    void selectPrev();
+    void executeCurrent();
 
 private:
     struct PaletteCommand {
@@ -27,7 +22,5 @@ private:
         std::function<void()> action;
     };
     std::vector<PaletteCommand> commands;
-
-    QLineEdit* searchEdit;
     QListWidget* listWidget;
 };

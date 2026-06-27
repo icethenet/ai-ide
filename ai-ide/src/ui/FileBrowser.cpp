@@ -31,4 +31,5 @@ FileBrowser::FileBrowser(QWidget* parent) : QWidget(parent) {
 void FileBrowser::setRootDirectory(const QString& path) {
     model->setRootPath(path);
     tree->setRootIndex(model->index(path));
+    emit rootChanged(path);
 }
