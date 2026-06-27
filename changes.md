@@ -1,5 +1,32 @@
 # Build Fix Changes Report
 
+## Latest Update: Advanced Upgrades (Phases B, C, D, and E) ✨
+
+### New Features Added
+
+1. **Phase B: Source Control & Project Search**
+   - **Visual Git Panel (`GitWidget`)**: Real-time git status checkboxes, commit input boxes, and push/pull sync queues.
+   - **Asynchronous Search (`SearchWidget`)**: Recursively searches the workspace in a background thread without blocking the UI.
+   - **Gutter Diff Indicators**: Green (added), blue (modified), and red (deleted) bars inside the editor gutter.
+
+2. **Phase C: Terminal & Build Improvements**
+   - **Recursive Split Terminal Panes (`TerminalPane`)**: Horizontal/vertical terminal tiling, retaining active process sessions.
+   - **ANSI Color Support**: Converted escape sequences (bold/colors) into rich HTML styling.
+   - **Inline Diagnostics Highlights**: Highlight errors/warnings with wave underlines.
+   - **CMake Configuration Selectors**: Status bar selectors to adjust release configurations and compiler targets.
+
+3. **Phase D: Advanced Editor Features (LSP)**
+   - **Clangd Language Server Integration**: Backed by `clangd.exe` using JSON-RPC messages.
+   - **Fuzzy Autocomplete Dropdown**: Floating popup overlay next to the cursor when typing `.`, `->`, `::` or `Ctrl+Space`.
+   - **Right-Click Definition & References**: "Go to Definition" navigates source ranges; "Find References" indexes matches in a bottom panel.
+
+4. **Phase E: AI Code Diagnostics & Visual Polish**
+   - **Gutter Lightbulbs**: Draws a `💡` symbol next to compile error or warning lines.
+   - **Interactive AI Auto-Fix**: Right-clicking a diagnostic line lets you choose **💡 Fix with AI...** to automatically refactor and fix compilation errors.
+   - **Visual Polish QSS styles**: Cohesive dark theme styling for scrollbars, menus, tables, and tab views.
+
+---
+
 ## Latest Update: Phase A, Top Control Bar, and UI Tuning ✨
 
 ### New Features Added
