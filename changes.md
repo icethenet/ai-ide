@@ -1,36 +1,33 @@
 # Build Fix Changes Report
 
-## Latest Update: Phases 4 & 5, UI Restructuring ✨
+## Latest Update: Phase A, Top Control Bar, and UI Tuning ✨
 
 ### New Features Added
-1. **Phase 4: Problems Tab & Compiler Diagnostic Parsing**
-   - Swapped raw widget with a custom `ProblemsWidget` table.
-   - Merged stderr/stdout build outputs in real-time.
-   - Built a regex compiler diagnostic parser matching `^(.+?):(\d+):(\d+):\s*(error|warning|note|fatal error):\s*(.*)$`.
-   - Wired table row double-clicking to open the file and navigate directly to the error line, highlighting it.
+1. **Phase A: Editor Core & Layout Tuning**
+   - **Syntax Highlighting**: Subclassed `QSyntaxHighlighter` to colorize C++ types, keywords, preprocessor directives, functions, strings, numbers, and single/multiline comments dynamically.
+   - **Gutter Line Numbers**: Subclassed `QPlainTextEdit` as `CodeEditor` to calculate line digits width margins, synchronize scrolling, highlight the active text cursor line, and display left-aligned vertical line numbers.
    
-2. **Phase 5: Debug Tab with GDB/LLDB Interface Wrapper**
-   - Created the `DebugWidget` containing debugger controls (Start, Step Over, Step Into, Continue, Stop), GDB/LLDB console log terminal, command input bar, and live local variables tree view inspector.
-   - Automatically wraps `lldb-mi.exe` (toolchain) or `gdb.exe` on system PATH.
-   - If no debugger is present, falls back gracefully to a fully interactive **Simulation Mode** that showcases stepping and variables updates.
+2. **Top Control Bar Layout & Inputs**
+   - **Split Input Header**: Added a horizontal control bar directly under the menu bar.
+   - **Interactive Browser URL (Left 50% width)**: Shows the active file path or project directory. Typing paths and pressing Enter navigates directory trees or opens files. Select directories visually using the "Browse..." button. Synchronizes paths on tab changes or file browser double clicks.
+   - **Integrated Command Palette (Right 50% width)**: Replaced floating modal dialogs with a top control bar line edit. Typing or focusing inside it drops down a non-focus-stealing fuzzy search menu directly below the input, routing selection and execution hotkeys.
 
-3. **Diff Dock Removal**
-   - Removed the redundant "Diff" dock panel from `EditorWindow`.
-   - Decoupled `AIPatchController` to manage its `DiffView` locally inside popup preview dialogs.
-   - Allows the **AI Chat** panel to take up the full vertical height of the right dock area.
+3. **Phases 4 & 5 Integration**
+   - **Problems Tab**: Real-time diagnostic parser extracting warnings/errors from compiler stdout/stderr streams using regex, and navigating to source files on row double click.
+   - **Debugging Panel**: Wrapping LLDB-MI/GDB for process control, logs console, variable tree inspectors, and falling back to a debug step simulator.
 
-4. **Welcome Page Dashboard Tab**
-   - Built `WelcomeWidget` featuring a dark dashboard startup screen with custom CSS styled hover buttons linking to Create New File, Open File, Open Folder, Build Project, and AI Settings.
-   - Automatically opens and focuses the Welcome screen on application startup.
-
-5. **Restructured Editor Tab Buttons & Tab Close**
-   - Moved the "Close" button to the bottom of the editor tab (right-aligned).
-   - Added a "Save As" button alongside it.
-   - Wired the Close button to emit `closeRequested()`, triggering `EditorWindow` to close the tab and delete the widget (`.deleteLater()`) to prevent memory leaks.
+4. **Welcome Page & Diff Dock Removal**
+   - Persistent right side Diff Dock removed, enabling AI Chat to occupy the full side column height.
+   - Welcome Page dashboard tab loads by default on startup with modern QSS hover actions.
 
 **Files Modified**:
 - `add_custom_editor_and_features.py` (Source Generator script)
 - `changes.md` (This file)
+- `ai-ide/src/ui/CommandPalette.hpp` / `.cpp`
+- `ai-ide/src/ui/CppHighlighter.hpp` / `.cpp`
+- `ai-ide/src/ui/CustomEditor.hpp` / `.cpp`
+- `ai-ide/src/ui/EditorWindow.hpp` / `.cpp`
+- `ai-ide/src/ui/FileBrowser.hpp` / `.cpp`
 
 ---
 
