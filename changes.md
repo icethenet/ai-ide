@@ -1,5 +1,35 @@
 # Build Fix Changes Report
 
+## Latest Update: Semantic Codebase Search (Vector RAG) 🔍✨
+
+### New Features Added
+
+1. **Local SQLite Vector Database**
+   - Implemented a local SQLite database (`.antigravity/vector_index.db`) in the workspace to cache chunk metadata, line mappings, and raw embedding float vectors.
+   
+2. **Incremental Chunking & Embeddings API Client**
+   - **Line-based Sliding Window**: Chunks large files incrementally, tracking start/end lines.
+   - **Smart Incremental Update**: Scans workspace files and only regenerates embeddings if a file's last modified timestamp differs from database cache.
+   - **Dual API Support**: Calls the Google Gemini embeddings endpoint (`text-embedding-004`) when configured with Gemini/Antigravity profiles, or the local Ollama embeddings endpoint (`nomic-embed-text`) otherwise. Runs network requests synchronously inside background worker threads to keep UI completely fluent.
+
+3. **C++ Cosine Similarity Ranking Engine**
+   - Implemented the dot product vector similarity algorithm directly in C++ for ultra-fast, millisecond matching scores ranking.
+
+4. **Semantic Search Sidebar UI**
+   - Added a **"Semantic (AI RAG)"** search toggle checkbox to the **Search** tab.
+   - Added a **"Rebuild Index"** action button and progress messages showing current indexing counts.
+   - Matches display similarity percentages (e.g. `[94% Match]`) next to file headers, and double-clicking results opens and navigates directly to matching lines inside the editor.
+
+**Files Modified**:
+- `add_custom_editor_and_features.py`
+- `ai-ide/src/CMakeLists.txt`
+- `ai-ide/src/ui/SearchWidget.hpp` / `.cpp`
+
+**New Files Added**:
+- `ai-ide/src/ai/VectorIndexManager.hpp` / `.cpp`
+
+---
+
 ## Latest Update: AI Connections Admin, Logo, Find & Replace, and Navigation Features ✨
 
 ### New Features Added

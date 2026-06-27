@@ -354,6 +354,366 @@ AIResponse AntigravityProvider::send(const AIRequest& req) {
 }
 """)
 
+write(f"{ROOT}/src/ai/VectorIndexManager.hpp", r"""#pragma once
+#include <QObject>
+#include <QThread>
+#include <QSqlDatabase>
+#include <QVector>
+#include <QStringList>
+#include <QMutex>
+
+struct SearchResult {
+    QString filePath;
+    int lineNumber;
+    QString lineContent;
+    float score;
+};
+
+class VectorIndexManager : public QObject {
+    Q_OBJECT
+public:
+    static VectorIndexManager& instance();
+
+    void startIndexing(const QString& rootPath);
+    void stopIndexing();
+    bool isIndexing() const;
+
+    QVector<SearchResult> search(const QString& queryText, float threshold = 0.5f);
+
+signals:
+    void indexingProgress(int current, int total);
+    void indexingFinished();
+
+private:
+    VectorIndexManager();
+    ~VectorIndexManager();
+
+    void initDb();
+    QSqlDatabase db;
+    bool m_indexing = false;
+    QMutex mutex;
+};
+
+class IndexWorker : public QThread {
+    Q_OBJECT
+public:
+    IndexWorker(const QString& rootPath, QObject* parent = nullptr);
+signals:
+    void progress(int current, int total);
+protected:
+    void run() override;
+private:
+    QString root;
+    void processFile(const QString& path, QSqlDatabase& threadDb);
+    QVector<float> getEmbedding(const QString& text);
+};
+""")
+
+write(f"{ROOT}/src/ai/VectorIndexManager.cpp", r"""#include "VectorIndexManager.hpp"
+#include "../ui/SettingsManager.hpp"
+#include <QDirIterator>
+#include <QFile>
+#include <QTextStream>
+#include <QFileInfo>
+#include <QDateTime>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QSqlQuery>
+#include <QSqlError>
+#include <QDir>
+#include <cmath>
+#include <iostream>
+
+VectorIndexManager& VectorIndexManager::instance() {
+    static VectorIndexManager inst;
+    return inst;
+}
+
+VectorIndexManager::VectorIndexManager() {
+    initDb();
+}
+
+VectorIndexManager::~VectorIndexManager() {
+    stopIndexing();
+}
+
+void VectorIndexManager::initDb() {
+    db = QSqlDatabase::addDatabase("QSQLITE", "vector_connection");
+    QDir().mkpath(".antigravity");
+    db.setDatabaseName(".antigravity/vector_index.db");
+    
+    if (!db.open()) {
+        std::cerr << "[VectorIndex] Failed to open SQLite vector index db: " 
+                  << db.lastError().text().toStdString() << std::endl;
+        return;
+    }
+
+    QSqlQuery q(db);
+    bool ok = q.exec(
+        "CREATE TABLE IF NOT EXISTS codebase_embeddings ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  file_path TEXT NOT NULL,"
+        "  chunk_index INTEGER NOT NULL,"
+        "  chunk_text TEXT NOT NULL,"
+        "  start_line INTEGER NOT NULL,"
+        "  end_line INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  last_modified INTEGER NOT NULL,"
+        "  UNIQUE(file_path, chunk_index)"
+        ")"
+    );
+    if (!ok) {
+        std::cerr << "[VectorIndex] Error creating table: " 
+                  << q.lastError().text().toStdString() << std::endl;
+    }
+}
+
+void VectorIndexManager::startIndexing(const QString& rootPath) {
+    QMutexLocker locker(&mutex);
+    if (m_indexing) return;
+    m_indexing = true;
+
+    auto* worker = new IndexWorker(rootPath, this);
+    connect(worker, &IndexWorker::progress, this, &VectorIndexManager::indexingProgress);
+    connect(worker, &IndexWorker::finished, this, [this, worker]() {
+        QMutexLocker l(&mutex);
+        m_indexing = false;
+        worker->deleteLater();
+        emit indexingFinished();
+    });
+    worker->start();
+}
+
+void VectorIndexManager::stopIndexing() {
+    // Handled by workers
+}
+
+bool VectorIndexManager::isIndexing() const {
+    return m_indexing;
+}
+
+static float cosineSimilarity(const QVector<float>& a, const QVector<float>& b) {
+    if (a.size() != b.size() || a.isEmpty()) return 0.0f;
+    float dot = 0.0f;
+    float normA = 0.0f;
+    float normB = 0.0f;
+    for (int i = 0; i < a.size(); ++i) {
+        dot += a[i] * b[i];
+        normA += a[i] * a[i];
+        normB += b[i] * b[i];
+    }
+    if (normA == 0.0f || normB == 0.0f) return 0.0f;
+    return dot / (std::sqrt(normA) * std::sqrt(normB));
+}
+
+static QVector<float> queryEmbedding(const QString& text) {
+    auto& settings = SettingsManager::instance();
+    QString provider = QString::fromStdString(settings.getProviderType());
+    
+    QString apiUrl;
+    QJsonObject json;
+
+    if (provider == "Gemini" || provider == "Antigravity AI" || provider == "Claude") {
+        QString key = QString::fromStdString(settings.getGeminiApiKey());
+        if (key.isEmpty()) key = QString::fromStdString(settings.getAntigravityApiKey());
+        if (key.isEmpty()) key = QString::fromStdString(settings.getClaudeApiKey());
+
+        apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + key;
+        
+        QJsonObject contentPart;
+        contentPart["text"] = text;
+        QJsonArray partsArray;
+        partsArray.append(contentPart);
+        QJsonObject contentObj;
+        contentObj["parts"] = partsArray;
+
+        json["model"] = "models/text-embedding-004";
+        json["content"] = contentObj;
+    } else {
+        QString endpoint = QString::fromStdString(settings.getOllamaEndpoint());
+        if (endpoint.isEmpty()) endpoint = "http://localhost:11434";
+        apiUrl = endpoint + "/api/embeddings";
+        
+        json["model"] = "nomic-embed-text";
+        json["prompt"] = text;
+    }
+
+    QNetworkAccessManager manager;
+    QNetworkRequest request{QUrl(apiUrl)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply* reply = manager.post(request, QJsonDocument(json).toJson());
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    QVector<float> vec;
+    if (reply->error() == QNetworkReply::NoError) {
+        QJsonDocument resDoc = QJsonDocument::fromJson(reply->readAll());
+        QJsonObject resObj = resDoc.object();
+        
+        if (provider == "Gemini" || provider == "Antigravity AI" || provider == "Claude") {
+            if (resObj.contains("embedding")) {
+                QJsonArray values = resObj["embedding"].toObject()["values"].toArray();
+                for (const auto& v : values) vec.append(v.toDouble());
+            }
+        } else {
+            if (resObj.contains("embedding")) {
+                QJsonArray values = resObj["embedding"].toArray();
+                for (const auto& v : values) vec.append(v.toDouble());
+            }
+        }
+    }
+    reply->deleteLater();
+    return vec;
+}
+
+QVector<SearchResult> VectorIndexManager::search(const QString& queryText, float threshold) {
+    QVector<SearchResult> results;
+    
+    QVector<float> qVec = queryEmbedding(queryText);
+    if (qVec.isEmpty()) {
+        std::cerr << "[VectorIndex] Failed to get query embedding" << std::endl;
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.exec("SELECT file_path, start_line, chunk_text, embedding FROM codebase_embeddings");
+    while (query.next()) {
+        QString filePath = query.value(0).toString();
+        int startLine = query.value(1).toInt();
+        QString chunkText = query.value(2).toString();
+        QByteArray blob = query.value(3).toByteArray();
+
+        QVector<float> recordVec;
+        recordVec.resize(blob.size() / sizeof(float));
+        memcpy(recordVec.data(), blob.constData(), blob.size());
+
+        float score = cosineSimilarity(qVec, recordVec);
+        if (score >= threshold) {
+            SearchResult r;
+            r.filePath = filePath;
+            r.lineNumber = startLine;
+            r.lineContent = chunkText.left(100).replace("\n", " ");
+            r.score = score;
+            results.append(r);
+        }
+    }
+
+    std::sort(results.begin(), results.end(), [](const SearchResult& a, const SearchResult& b) {
+        return a.score > b.score;
+    });
+
+    return results;
+}
+
+IndexWorker::IndexWorker(const QString& rootPath, QObject* parent)
+    : QThread(parent), root(rootPath) {}
+
+void IndexWorker::run() {
+    if (root.isEmpty()) return;
+
+    QSqlDatabase threadDb = QSqlDatabase::addDatabase("QSQLITE", "thread_connection");
+    threadDb.setDatabaseName(".antigravity/vector_index.db");
+    if (!threadDb.open()) return;
+
+    QStringList files;
+    QDirIterator it(root, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        QString path = it.next();
+        QString cleanPath = QDir::cleanPath(path);
+        if (cleanPath.contains("/.git/") || cleanPath.contains("/build/") || cleanPath.contains("/.agents/") || cleanPath.contains("/.antigravity/")) {
+            continue;
+        }
+        QFileInfo info(path);
+        QString ext = info.suffix().toLower();
+        if (ext == "cpp" || ext == "hpp" || ext == "h" || ext == "py" || ext == "md" || ext == "txt") {
+            files.append(cleanPath);
+        }
+    }
+
+    int total = files.size();
+    for (int i = 0; i < total; ++i) {
+        if (isInterruptionRequested()) break;
+        emit progress(i + 1, total);
+        processFile(files[i], threadDb);
+    }
+}
+
+void IndexWorker::processFile(const QString& path, QSqlDatabase& threadDb) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+
+    QFileInfo info(path);
+    qint64 lastMod = info.lastModified().toSecsSinceEpoch();
+
+    QSqlQuery check(threadDb);
+    check.prepare("SELECT last_modified FROM codebase_embeddings WHERE file_path = :path LIMIT 1");
+    check.bindValue(":path", path);
+    check.exec();
+    if (check.next()) {
+        qint64 dbMod = check.value(0).toLongLong();
+        if (dbMod == lastMod) {
+            return; 
+        }
+        
+        QSqlQuery del(threadDb);
+        del.prepare("DELETE FROM codebase_embeddings WHERE file_path = :path");
+        del.bindValue(":path", path);
+        del.exec();
+    }
+
+    QTextStream in(&file);
+    QString text = in.readAll();
+    file.close();
+
+    QStringList lines = text.split("\n");
+    int chunkLineSize = 25;
+    int chunkOverlap = 5;
+
+    int chunkIndex = 0;
+    for (int start = 0; start < lines.size(); start += (chunkLineSize - chunkOverlap)) {
+        if (isInterruptionRequested()) break;
+
+        int end = qMin(start + chunkLineSize, lines.size());
+        QStringList chunkLines = lines.mid(start, end - start);
+        QString chunkText = chunkLines.join("\n").trimmed();
+        if (chunkText.isEmpty()) continue;
+
+        QVector<float> vec = getEmbedding(chunkText);
+        if (vec.isEmpty()) continue; 
+
+        QByteArray blob;
+        blob.resize(vec.size() * sizeof(float));
+        memcpy(blob.data(), vec.constData(), blob.size());
+
+        QSqlQuery insert(threadDb);
+        insert.prepare(
+            "INSERT OR REPLACE INTO codebase_embeddings "
+            "(file_path, chunk_index, chunk_text, start_line, end_line, embedding, last_modified) "
+            "VALUES (:path, :idx, :txt, :start, :end, :embed, :mod)"
+        );
+        insert.bindValue(":path", path);
+        insert.bindValue(":idx", chunkIndex++);
+        insert.bindValue(":txt", chunkText);
+        insert.bindValue(":start", start + 1);
+        insert.bindValue(":end", end);
+        insert.bindValue(":embed", blob);
+        insert.bindValue(":mod", lastMod);
+        insert.exec();
+    }
+}
+
+QVector<float> IndexWorker::getEmbedding(const QString& text) {
+    return queryEmbedding(text);
+}
+""")
+
 # ---------------------------------------------------------
 # Settings Manager (Singleton for App Configuration)
 # ---------------------------------------------------------
@@ -2090,6 +2450,10 @@ write(f"{ROOT}/src/ui/SearchWidget.hpp", r"""#pragma once
 #include <QLineEdit>
 #include <QTreeWidget>
 #include <QThread>
+#include <QCheckBox>
+#include <QLabel>
+#include <QPushButton>
+#include "../ai/VectorIndexManager.hpp"
 
 class SearchThread : public QThread {
     Q_OBJECT
@@ -2101,6 +2465,22 @@ signals:
     void matchFound(const QString& filePath, int lineNumber, const QString& lineContent);
 private:
     QString root;
+    QString q;
+};
+
+class SemanticSearchThread : public QThread {
+    Q_OBJECT
+public:
+    SemanticSearchThread(const QString& query, QObject* parent = nullptr)
+        : QThread(parent), q(query) {}
+signals:
+    void searchCompleted(const QVector<SearchResult>& results);
+protected:
+    void run() override {
+        auto results = VectorIndexManager::instance().search(q, 0.4f);
+        emit searchCompleted(results);
+    }
+private:
     QString q;
 };
 
@@ -2117,19 +2497,30 @@ private slots:
     void startSearch();
     void addMatch(const QString& filePath, int lineNumber, const QString& lineContent);
     void onDoubleClicked(QTreeWidgetItem* item, int column);
+    
+    void runSemanticSearch();
+    void renderSemanticResults(const QVector<SearchResult>& results);
+    void updateProgress(int current, int total);
+    void indexingFinished();
+    void startIndexing();
 
 private:
     QString rootPath;
     QLineEdit* searchEdit;
     QTreeWidget* resultsTree;
     SearchThread* activeThread;
+    SemanticSearchThread* activeSemanticThread = nullptr;
+    
+    QCheckBox* semanticSearchCheckbox;
+    QLabel* progressLabel;
+    QPushButton* indexBtn;
+    QPushButton* searchBtn;
 };
 """)
 
 write(f"{ROOT}/src/ui/SearchWidget.cpp", r"""#include "SearchWidget.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QPushButton>
 #include <QDirIterator>
 #include <QFile>
 #include <QTextStream>
@@ -2160,15 +2551,16 @@ void SearchThread::run() {
         QFile file(path);
         if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&file);
-            int lineNum = 0;
+            int lineNumber = 1;
             while (!in.atEnd()) {
                 if (isInterruptionRequested()) break;
-                lineNum++;
                 QString line = in.readLine();
                 if (line.contains(q, Qt::CaseInsensitive)) {
-                    emit matchFound(path, lineNum, line.trimmed());
+                    emit matchFound(path, lineNumber, line.trimmed());
                 }
+                lineNumber++;
             }
+            file.close();
         }
     }
 }
@@ -2184,13 +2576,29 @@ SearchWidget::SearchWidget(QWidget* parent)
     searchEdit->setPlaceholderText("Search in workspace...");
     searchEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px; font-family: 'Segoe UI', Arial; }");
     
-    auto* searchBtn = new QPushButton("Find", this);
+    searchBtn = new QPushButton("Find", this);
     searchBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; }"
                              "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
     
     searchBar->addWidget(searchEdit);
     searchBar->addWidget(searchBtn);
     layout->addLayout(searchBar);
+
+    auto* semanticBar = new QHBoxLayout();
+    semanticSearchCheckbox = new QCheckBox("Semantic (AI RAG)", this);
+    semanticSearchCheckbox->setStyleSheet("QCheckBox { color: #abb2bf; font-size: 11px; }");
+    
+    indexBtn = new QPushButton("Rebuild Index", this);
+    indexBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 3px; padding: 2px 6px; font-size: 11px; }"
+                            "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+    
+    semanticBar->addWidget(semanticSearchCheckbox);
+    semanticBar->addWidget(indexBtn);
+    layout->addLayout(semanticBar);
+
+    progressLabel = new QLabel(this);
+    progressLabel->setStyleSheet("QLabel { color: #5c6370; font-size: 11px; padding: 2px; }");
+    layout->addWidget(progressLabel);
 
     resultsTree = new QTreeWidget(this);
     resultsTree->setHeaderLabel("Search Results");
@@ -2201,14 +2609,42 @@ SearchWidget::SearchWidget(QWidget* parent)
 
     connect(searchEdit, &QLineEdit::returnPressed, this, &SearchWidget::startSearch);
     connect(searchBtn, &QPushButton::clicked, this, &SearchWidget::startSearch);
+    connect(indexBtn, &QPushButton::clicked, this, &SearchWidget::startIndexing);
     connect(resultsTree, &QTreeWidget::itemDoubleClicked, this, &SearchWidget::onDoubleClicked);
+
+    connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingProgress, this, &SearchWidget::updateProgress);
+    connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingFinished, this, &SearchWidget::indexingFinished);
 }
 
 void SearchWidget::setRootPath(const QString& path) {
     rootPath = path;
+    if (!rootPath.isEmpty()) {
+        VectorIndexManager::instance().startIndexing(rootPath);
+    }
+}
+
+void SearchWidget::startIndexing() {
+    if (rootPath.isEmpty()) return;
+    indexBtn->setEnabled(false);
+    progressLabel->setText("Building semantic index...");
+    VectorIndexManager::instance().startIndexing(rootPath);
+}
+
+void SearchWidget::updateProgress(int current, int total) {
+    progressLabel->setText(QString("Indexing codebase: %1 of %2 files...").arg(current).arg(total));
+}
+
+void SearchWidget::indexingFinished() {
+    indexBtn->setEnabled(true);
+    progressLabel->setText("Semantic index ready!");
 }
 
 void SearchWidget::startSearch() {
+    if (semanticSearchCheckbox->isChecked()) {
+        runSemanticSearch();
+        return;
+    }
+
     if (activeThread) {
         activeThread->requestInterruption();
         activeThread->wait();
@@ -2217,12 +2653,61 @@ void SearchWidget::startSearch() {
     }
 
     resultsTree->clear();
+    progressLabel->clear();
     QString query = searchEdit->text().trimmed();
     if (query.isEmpty() || rootPath.isEmpty()) return;
 
     activeThread = new SearchThread(rootPath, query, this);
     connect(activeThread, &SearchThread::matchFound, this, &SearchWidget::addMatch);
     activeThread->start();
+}
+
+void SearchWidget::runSemanticSearch() {
+    if (activeSemanticThread) {
+        activeSemanticThread->requestInterruption();
+        activeSemanticThread->wait();
+        delete activeSemanticThread;
+        activeSemanticThread = nullptr;
+    }
+
+    resultsTree->clear();
+    QString query = searchEdit->text().trimmed();
+    if (query.isEmpty() || rootPath.isEmpty()) return;
+
+    progressLabel->setText("Querying vector model...");
+    searchBtn->setEnabled(false);
+    searchEdit->setEnabled(false);
+
+    activeSemanticThread = new SemanticSearchThread(query, this);
+    connect(activeSemanticThread, &SemanticSearchThread::searchCompleted, this, &SearchWidget::renderSemanticResults);
+    connect(activeSemanticThread, &QThread::finished, this, [this]() {
+        searchBtn->setEnabled(true);
+        searchEdit->setEnabled(true);
+    });
+    activeSemanticThread->start();
+}
+
+void SearchWidget::renderSemanticResults(const QVector<SearchResult>& results) {
+    progressLabel->setText(QString("Found %1 semantic matches.").arg(results.size()));
+    for (const auto& r : results) {
+        QList<QTreeWidgetItem*> items = resultsTree->findItems(r.filePath, Qt::MatchExactly, 0);
+        QTreeWidgetItem* parentItem = nullptr;
+        
+        if (items.isEmpty()) {
+            parentItem = new QTreeWidgetItem(resultsTree);
+            parentItem->setText(0, r.filePath);
+            parentItem->setToolTip(0, r.filePath);
+        } else {
+            parentItem = items.first();
+        }
+
+        auto* childItem = new QTreeWidgetItem(parentItem);
+        childItem->setText(0, QString("[%1% Match] Line %2: %3").arg(qRound(r.score * 100)).arg(r.lineNumber).arg(r.lineContent));
+        childItem->setData(0, Qt::UserRole, r.filePath);
+        childItem->setData(0, Qt::UserRole + 1, r.lineNumber);
+        
+        parentItem->setExpanded(true);
+    }
 }
 
 void SearchWidget::addMatch(const QString& filePath, int lineNumber, const QString& lineContent) {
@@ -5514,10 +5999,10 @@ write(f"{ROOT}/src/CMakeLists.txt", r"""cmake_minimum_required(VERSION 3.16)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS *.cpp *.hpp *.qrc)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql)
 
 add_executable(ai-ide ${SOURCES})
-target_link_libraries(ai-ide PRIVATE Qt6::Widgets Qt6::Network)
+target_link_libraries(ai-ide PRIVATE Qt6::Widgets Qt6::Network Qt6::Sql)
 
 # Helps IntelliSense find headers in subdirectories like ui/ or ai/
 target_include_directories(ai-ide PRIVATE 
