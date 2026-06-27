@@ -16,6 +16,7 @@
 #include <QContextMenuEvent>
 #include <QTimer>
 #include <QProcess>
+#include <QMainWindow>
 
 CustomEditor::CustomEditor(QWidget* parent)
     : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
@@ -229,7 +230,7 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
             painter.drawText(0, top, lineNumberArea->width() - 5, fontMetrics().height(),
                              Qt::AlignRight | Qt::AlignVCenter, number);
             
-            // Match git lines
+            // Draw Git diff color bars
             for (const auto& dl : diffLines) {
                 if (dl.line == blockNumber + 1) {
                     QColor color;
@@ -240,6 +241,19 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
                     painter.fillRect(QRect(0, top, markerWidth, bottom - top), color);
                     break;
                 }
+            }
+
+            // Draw lightbulb emoji 💡 slightly to the left of the line number if diagnostic exists
+            bool hasDiag = false;
+            for (const auto& diag : diagnostics) {
+                if (diag.line == blockNumber + 1) {
+                    hasDiag = true;
+                    break;
+                }
+            }
+            if (hasDiag) {
+                painter.drawText(2, top, lineNumberArea->width() - 5, fontMetrics().height(),
+                                 Qt::AlignLeft | Qt::AlignVCenter, "💡");
             }
         }
 
@@ -366,11 +380,43 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     QMenu* menu = createStandardContextMenu();
     menu->addSeparator();
 
+    // Find if there is a diagnostic on the clicked line
+    QTextCursor clickedCursor = cursorForPosition(event->pos());
+    int clickedLine = clickedCursor.blockNumber() + 1;
+    
+    QString diagMessage;
+    bool hasDiag = false;
+    for (const auto& diag : diagnostics) {
+        if (diag.line == clickedLine) {
+            hasDiag = true;
+            diagMessage = diag.message;
+            break;
+        }
+    }
+
+    QAction* aiFixAction = nullptr;
+    if (hasDiag) {
+        aiFixAction = menu->addAction("💡 Fix with AI...");
+    }
+
     auto* gotoAction = menu->addAction("Go to Definition");
     auto* findRefAction = menu->addAction("Find References");
 
     QAction* selected = menu->exec(event->globalPos());
-    if (selected == gotoAction) {
+    if (selected == aiFixAction && hasDiag) {
+        QWidget* w = parentWidget();
+        while (w) {
+            auto* mainWindow = qobject_cast<QMainWindow*>(w);
+            if (mainWindow) {
+                QMetaObject::invokeMethod(mainWindow, "fixProblemWithAI",
+                                          Q_ARG(QString, filePath),
+                                          Q_ARG(int, clickedLine),
+                                          Q_ARG(QString, diagMessage));
+                break;
+            }
+            w = w->parentWidget();
+        }
+    } else if (selected == gotoAction) {
         QTextCursor tc = cursorForPosition(event->pos());
         int line = tc.blockNumber();
         int col = tc.columnNumber();

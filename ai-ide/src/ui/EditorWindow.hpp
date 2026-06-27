@@ -47,6 +47,7 @@ private:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
     void showSymbolReferences(const QJsonArray& locations);
+    Q_INVOKABLE void fixProblemWithAI(const QString& filePath, int line, const QString& message);
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;

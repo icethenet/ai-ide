@@ -1416,6 +1416,7 @@ write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include <QContextMenuEvent>
 #include <QTimer>
 #include <QProcess>
+#include <QMainWindow>
 
 CustomEditor::CustomEditor(QWidget* parent)
     : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
@@ -1629,7 +1630,7 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
             painter.drawText(0, top, lineNumberArea->width() - 5, fontMetrics().height(),
                              Qt::AlignRight | Qt::AlignVCenter, number);
             
-            // Match git lines
+            // Draw Git diff color bars
             for (const auto& dl : diffLines) {
                 if (dl.line == blockNumber + 1) {
                     QColor color;
@@ -1640,6 +1641,19 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
                     painter.fillRect(QRect(0, top, markerWidth, bottom - top), color);
                     break;
                 }
+            }
+
+            // Draw lightbulb emoji 💡 slightly to the left of the line number if diagnostic exists
+            bool hasDiag = false;
+            for (const auto& diag : diagnostics) {
+                if (diag.line == blockNumber + 1) {
+                    hasDiag = true;
+                    break;
+                }
+            }
+            if (hasDiag) {
+                painter.drawText(2, top, lineNumberArea->width() - 5, fontMetrics().height(),
+                                 Qt::AlignLeft | Qt::AlignVCenter, "💡");
             }
         }
 
@@ -1766,11 +1780,43 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     QMenu* menu = createStandardContextMenu();
     menu->addSeparator();
 
+    // Find if there is a diagnostic on the clicked line
+    QTextCursor clickedCursor = cursorForPosition(event->pos());
+    int clickedLine = clickedCursor.blockNumber() + 1;
+    
+    QString diagMessage;
+    bool hasDiag = false;
+    for (const auto& diag : diagnostics) {
+        if (diag.line == clickedLine) {
+            hasDiag = true;
+            diagMessage = diag.message;
+            break;
+        }
+    }
+
+    QAction* aiFixAction = nullptr;
+    if (hasDiag) {
+        aiFixAction = menu->addAction("💡 Fix with AI...");
+    }
+
     auto* gotoAction = menu->addAction("Go to Definition");
     auto* findRefAction = menu->addAction("Find References");
 
     QAction* selected = menu->exec(event->globalPos());
-    if (selected == gotoAction) {
+    if (selected == aiFixAction && hasDiag) {
+        QWidget* w = parentWidget();
+        while (w) {
+            auto* mainWindow = qobject_cast<QMainWindow*>(w);
+            if (mainWindow) {
+                QMetaObject::invokeMethod(mainWindow, "fixProblemWithAI",
+                                          Q_ARG(QString, filePath),
+                                          Q_ARG(int, clickedLine),
+                                          Q_ARG(QString, diagMessage));
+                break;
+            }
+            w = w->parentWidget();
+        }
+    } else if (selected == gotoAction) {
         QTextCursor tc = cursorForPosition(event->pos());
         int line = tc.blockNumber();
         int col = tc.columnNumber();
@@ -3096,6 +3142,7 @@ private:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
     void showSymbolReferences(const QJsonArray& locations);
+    Q_INVOKABLE void fixProblemWithAI(const QString& filePath, int line, const QString& message);
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -3207,6 +3254,34 @@ EditorWindow::EditorWindow(QWidget *parent)
       historyModel(new QStringListModel(this))
 {
     setWindowTitle("AI-IDE");
+
+    // Application-wide styling (Sleek dark theme)
+    setStyleSheet(
+        "QMainWindow { background-color: #21252b; color: #abb2bf; }"
+        "QWidget { background-color: #21252b; color: #abb2bf; font-family: 'Segoe UI', Arial; }"
+        "QScrollBar:vertical { background-color: #21252b; width: 12px; margin: 0px; }"
+        "QScrollBar::handle:vertical { background-color: #3e4452; min-height: 20px; border-radius: 6px; border: 2px solid #21252b; }"
+        "QScrollBar::handle:vertical:hover { background-color: #5c6370; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        "QScrollBar:horizontal { background-color: #21252b; height: 12px; margin: 0px; }"
+        "QScrollBar::handle:horizontal { background-color: #3e4452; min-width: 20px; border-radius: 6px; border: 2px solid #21252b; }"
+        "QScrollBar::handle:horizontal:hover { background-color: #5c6370; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+        "QTabWidget::pane { border: 1px solid #181a1f; background-color: #1e1e1e; }"
+        "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 8px 12px; border-top-left-radius: 4px; border-top-right-radius: 4px; border: 1px solid #181a1f; border-bottom: none; margin-right: 2px; }"
+        "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }"
+        "QTabBar::tab:hover { background-color: #2c313c; color: #ffffff; }"
+        "QTableWidget { background-color: #1e1e1e; color: #abb2bf; border: none; gridline-color: #282c34; selection-background-color: #3e4452; selection-color: #ffffff; }"
+        "QTableWidget::item { padding: 4px; }"
+        "QHeaderView::section { background-color: #21252b; color: #abb2bf; padding: 4px; border: 1px solid #181a1f; }"
+        "QMenuBar { background-color: #21252b; color: #abb2bf; border-bottom: 1px solid #181a1f; }"
+        "QMenuBar::item { background-color: transparent; padding: 4px 10px; }"
+        "QMenuBar::item:selected { background-color: #3e4452; color: #ffffff; border-radius: 4px; }"
+        "QMenu { background-color: #21252b; color: #abb2bf; border: 1px solid #181a1f; border-radius: 4px; padding: 4px 0px; }"
+        "QMenu::item { padding: 6px 20px; }"
+        "QMenu::item:selected { background-color: #3e4452; color: #ffffff; }"
+        "QStatusBar { background-color: #21252b; color: #abb2bf; border-top: 1px solid #181a1f; }"
+    );
 
     createCentralEditor();
     createDocks();
@@ -3914,6 +3989,29 @@ void EditorWindow::showSymbolReferences(const QJsonArray& locations) {
             bottomTabWidget->setCurrentIndex(refIdx);
         }
     }
+}
+
+void EditorWindow::fixProblemWithAI(const QString& filePath, int line, const QString& message) {
+    if (filePath.isEmpty() || !aiPatchController) return;
+
+    QString codeContent;
+    QFile file(filePath);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        codeContent = QTextStream(&file).readAll();
+    }
+    
+    if (codeContent.isEmpty()) return;
+
+    QString prompt = QString("Here is a compiler diagnostic on line %1: \"%2\"\n\n"
+                             "Please review this code from the file \"%3\" and rewrite it to fix the compiler warning or error:\n\n"
+                             "```cpp\n%4\n```")
+                             .arg(line)
+                             .arg(message)
+                             .arg(QFileInfo(filePath).fileName())
+                             .arg(codeContent);
+
+    aiPatchController->setEditor(currentEditor());
+    aiPatchController->requestRefactor(prompt);
 }
 """)
 
