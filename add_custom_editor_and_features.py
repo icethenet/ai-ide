@@ -995,6 +995,14 @@ public:
     void lineNumberAreaPaintEvent(QPaintEvent* event);
     int lineNumberAreaWidth();
 
+    struct Diagnostic {
+        int line;
+        QString message;
+        bool isError;
+    };
+    void setDiagnostics(const std::vector<Diagnostic>& diags);
+    void clearDiagnostics();
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
 
@@ -1004,6 +1012,8 @@ private slots:
     void updateLineNumberArea(const QRect& rect, int dy);
 
 private:
+    void highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections);
+
     QWidget* lineNumberArea;
     QString filePath;
     QTimer* diffTimer;
@@ -1012,6 +1022,7 @@ private:
         char type; // 'A', 'M', 'D'
     };
     std::vector<DiffLine> diffLines;
+    std::vector<Diagnostic> diagnostics;
 };
 
 class LineNumberArea : public QWidget {
@@ -1188,6 +1199,34 @@ void CodeEditor::resizeEvent(QResizeEvent* event) {
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
 }
 
+void CodeEditor::setDiagnostics(const std::vector<Diagnostic>& diags) {
+    diagnostics = diags;
+    highlightCurrentLine();
+}
+
+void CodeEditor::clearDiagnostics() {
+    diagnostics.clear();
+    highlightCurrentLine();
+}
+
+void CodeEditor::highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections) {
+    for (const auto& diag : diagnostics) {
+        QTextBlock block = document()->findBlockByNumber(diag.line - 1);
+        if (block.isValid()) {
+            QTextEdit::ExtraSelection selection;
+            selection.cursor = QTextCursor(block);
+            selection.cursor.select(QTextCursor::LineUnderCursor);
+            
+            QTextCharFormat format;
+            format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+            format.setUnderlineColor(diag.isError ? Qt::red : QColor(209, 154, 102));
+            selection.format = format;
+            
+            selections.append(selection);
+        }
+    }
+}
+
 void CodeEditor::highlightCurrentLine() {
     QList<QTextEdit::ExtraSelection> extraSelections;
 
@@ -1200,6 +1239,8 @@ void CodeEditor::highlightCurrentLine() {
         selection.cursor.clearSelection();
         extraSelections.append(selection);
     }
+
+    highlightDiagnostics(extraSelections);
 
     setExtraSelections(extraSelections);
 }
@@ -1299,158 +1340,405 @@ write(f"{ROOT}/src/ui/TerminalWidget.hpp", r"""#pragma once
 #include <QWidget>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QSplitter>
+#include <QVBoxLayout>
 
-class TerminalWidget : public QWidget {
+class TerminalPane : public QWidget {
     Q_OBJECT
 public:
-    explicit TerminalWidget(const QString& shellPath, QWidget* parent = nullptr);
-    ~TerminalWidget() override;
+    explicit TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit = nullptr, QProcess* existingProc = nullptr, QWidget* parent = nullptr);
+    ~TerminalPane() override;
+
+signals:
+    void closed();
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 
 private slots:
     void readOutput();
+    void splitHorizontal();
+    void splitVertical();
+    void closePane();
+    void onChildClosed();
 
 private:
+    void split(Qt::Orientation orientation);
+    QString ansiToHtml(const QString& ansiText);
+
+    QString shell;
     QPlainTextEdit* terminalEdit;
     QProcess* process;
+    QWidget* toolbar;
+    QWidget* contentArea;
+    QVBoxLayout* contentLayout;
+    
+    bool isSplit;
+    QSplitter* splitter;
+    TerminalPane* child1;
+    TerminalPane* child2;
+};
+
+class TerminalWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit TerminalWidget(const QString& shellPath, QWidget* parent = nullptr);
+private:
+    TerminalPane* rootPane;
 };
 """)
 
 write(f"{ROOT}/src/ui/TerminalWidget.cpp", r"""#include "TerminalWidget.hpp"
-#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QKeyEvent>
 #include <QRegularExpression>
 #include <QTextCursor>
+#include <QLabel>
 
-TerminalWidget::TerminalWidget(const QString& shellPath, QWidget* parent)
-    : QWidget(parent)
+TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit, QProcess* existingProc, QWidget* parent)
+    : QWidget(parent),
+      shell(shellPath),
+      terminalEdit(existingEdit),
+      process(existingProc),
+      isSplit(false),
+      splitter(nullptr),
+      child1(nullptr),
+      child2(nullptr)
 {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
 
-    terminalEdit = new QPlainTextEdit(this);
+    // Create toolbar
+    toolbar = new QWidget(this);
+    toolbar->setStyleSheet("QWidget { background-color: #282c34; border-bottom: 1px solid #181a1f; }");
+    auto* toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(10, 2, 10, 2);
     
-    // Monospace Font
-    QFont monoFont("Consolas", 10);
-    if (monoFont.fixedPitch()) {
-        terminalEdit->setFont(monoFont);
-    }
+    QString label = shellPath.contains("powershell") ? "PowerShell" : "Bash";
+    auto* shellLabel = new QLabel(label, this);
+    shellLabel->setStyleSheet("QLabel { color: #abb2bf; font-weight: bold; font-family: 'Segoe UI', Arial; }");
+    toolbarLayout->addWidget(shellLabel);
+    toolbarLayout->addStretch();
+
+    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 8px; font-family: 'Segoe UI', Arial; }"
+                       "QPushButton:hover { background-color: #3e4452; color: #ffffff; }";
     
-    // Visual terminal styling (dark theme)
-    terminalEdit->setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #d4d4d4; }");
+    auto* splitHBtn = new QPushButton("Split H", this);
+    splitHBtn->setStyleSheet(btnStyle);
+    connect(splitHBtn, &QPushButton::clicked, this, &TerminalPane::splitHorizontal);
+    toolbarLayout->addWidget(splitHBtn);
 
-    layout->addWidget(terminalEdit);
+    auto* splitVBtn = new QPushButton("Split V", this);
+    splitVBtn->setStyleSheet(btnStyle);
+    connect(splitVBtn, &QPushButton::clicked, this, &TerminalPane::splitVertical);
+    toolbarLayout->addWidget(splitVBtn);
 
-    process = new QProcess(this);
-    process->setProcessChannelMode(QProcess::MergedChannels);
+    auto* closeBtn = new QPushButton("Close", this);
+    closeBtn->setStyleSheet("QPushButton { background-color: #e06c75; color: #1e1e1e; border: none; border-radius: 4px; padding: 2px 8px; font-family: 'Segoe UI', Arial; font-weight: bold; }"
+                            "QPushButton:hover { background-color: #e5c07b; }");
+    connect(closeBtn, &QPushButton::clicked, this, &TerminalPane::closePane);
+    toolbarLayout->addWidget(closeBtn);
 
-    connect(process, &QProcess::readyReadStandardOutput, this, &TerminalWidget::readOutput);
+    // Show close button only if parent is a splitter
+    auto* parentSplitter = qobject_cast<QSplitter*>(parent);
+    closeBtn->setVisible(parentSplitter != nullptr);
 
-    // Install event filter to capture keyboard input
-    terminalEdit->installEventFilter(this);
+    mainLayout->addWidget(toolbar);
 
-    // Start shell process
-    QStringList args;
-    if (shellPath.contains("bash.exe")) {
-        args << "--login" << "-i";
+    contentArea = new QWidget(this);
+    contentLayout = new QVBoxLayout(contentArea);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(0);
+    mainLayout->addWidget(contentArea, 1);
+
+    if (!terminalEdit && !process) {
+        // Create new terminal session
+        terminalEdit = new QPlainTextEdit(contentArea);
+        QFont monoFont("Consolas", 10);
+        if (monoFont.fixedPitch()) {
+            terminalEdit->setFont(monoFont);
+        }
+        terminalEdit->setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #abb2bf; border: none; }");
+        contentLayout->addWidget(terminalEdit);
+
+        process = new QProcess(this);
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        connect(process, &QProcess::readyReadStandardOutput, this, &TerminalPane::readOutput);
+        
+        terminalEdit->installEventFilter(this);
+
+        QStringList args;
+        if (shellPath.contains("bash.exe")) {
+            args << "--login" << "-i";
+        }
+        process->start(shellPath, args);
+    } else {
+        // Take ownership of existing session
+        terminalEdit->setParent(contentArea);
+        contentLayout->addWidget(terminalEdit);
+        terminalEdit->installEventFilter(this);
+        connect(process, &QProcess::readyReadStandardOutput, this, &TerminalPane::readOutput);
     }
-    process->start(shellPath, args);
 }
 
-TerminalWidget::~TerminalWidget() {
-    if (process) {
+TerminalPane::~TerminalPane() {
+    if (process && process->state() != QProcess::NotRunning) {
         process->terminate();
         process->waitForFinished(1000);
     }
 }
 
-bool TerminalWidget::eventFilter(QObject* obj, QEvent* event) {
+void TerminalPane::splitHorizontal() {
+    split(Qt::Horizontal);
+}
+
+void TerminalPane::splitVertical() {
+    split(Qt::Vertical);
+}
+
+void TerminalPane::split(Qt::Orientation orientation) {
+    if (isSplit) return;
+
+    if (process) {
+        disconnect(process, &QProcess::readyReadStandardOutput, this, &TerminalPane::readOutput);
+    }
+    if (terminalEdit) {
+        terminalEdit->removeEventFilter(this);
+        contentLayout->removeWidget(terminalEdit);
+    }
+
+    isSplit = true;
+    
+    splitter = new QSplitter(orientation, contentArea);
+    contentLayout->addWidget(splitter);
+
+    child1 = new TerminalPane(shell, terminalEdit, process, splitter);
+    child2 = new TerminalPane(shell, nullptr, nullptr, splitter);
+
+    terminalEdit = nullptr;
+    process = nullptr;
+    if (toolbar) toolbar->hide();
+
+    splitter->addWidget(child1);
+    splitter->addWidget(child2);
+
+    connect(child1, &TerminalPane::closed, this, &TerminalPane::onChildClosed);
+    connect(child2, &TerminalPane::closed, this, &TerminalPane::onChildClosed);
+}
+
+void TerminalPane::closePane() {
+    emit closed();
+}
+
+void TerminalPane::onChildClosed() {
+    auto* closedChild = qobject_cast<TerminalPane*>(sender());
+    if (!closedChild) return;
+
+    TerminalPane* remainingChild = (closedChild == child1) ? child2 : child1;
+
+    // Reparent remaining session
+    terminalEdit = remainingChild->terminalEdit;
+    process = remainingChild->process;
+
+    if (terminalEdit) {
+        terminalEdit->setParent(contentArea);
+        contentLayout->addWidget(terminalEdit);
+        terminalEdit->installEventFilter(this);
+    }
+    if (process) {
+        process->setParent(this);
+        connect(process, &QProcess::readyReadStandardOutput, this, &TerminalPane::readOutput);
+    }
+
+    child1->deleteLater();
+    child2->deleteLater();
+    splitter->deleteLater();
+
+    child1 = nullptr;
+    child2 = nullptr;
+    splitter = nullptr;
+    isSplit = false;
+
+    if (toolbar) toolbar->show();
+}
+
+bool TerminalPane::eventFilter(QObject* obj, QEvent* event) {
     if (obj == terminalEdit && event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
         QString txt = keyEvent->text();
         
-        // Handle Ctrl combinations
         if (keyEvent->modifiers() & Qt::ControlModifier) {
             if (keyEvent->key() == Qt::Key_C) {
-                process->write("\x03");
+                if (process) process->write("\x03");
                 return true;
             } else if (keyEvent->key() == Qt::Key_Z) {
-                process->write("\x1A");
+                if (process) process->write("\x1A");
                 return true;
             } else if (keyEvent->key() == Qt::Key_D) {
-                process->write("\x04");
+                if (process) process->write("\x04");
                 return true;
             }
-            // Allow other Ctrl shortcuts to propagate (e.g. Ctrl+B, Ctrl+S)
             return false;
         }
 
-        // Handle special control sequences
         if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
-            process->write("\r\n");
+            if (process) process->write("\r\n");
             return true;
         } else if (keyEvent->key() == Qt::Key_Backspace) {
-            process->write("\b");
+            if (process) process->write("\b");
             return true;
         } else if (keyEvent->key() == Qt::Key_Tab) {
-            process->write("\t");
+            if (process) process->write("\t");
             return true;
         } else if (keyEvent->key() == Qt::Key_Escape) {
-            process->write("\x1B");
+            if (process) process->write("\x1B");
             return true;
         } else if (keyEvent->key() == Qt::Key_Up) {
-            process->write("\x1B[A");
+            if (process) process->write("\x1B[A");
             return true;
         } else if (keyEvent->key() == Qt::Key_Down) {
-            process->write("\x1B[B");
+            if (process) process->write("\x1B[B");
             return true;
         } else if (keyEvent->key() == Qt::Key_Right) {
-            process->write("\x1B[C");
+            if (process) process->write("\x1B[C");
             return true;
         } else if (keyEvent->key() == Qt::Key_Left) {
-            process->write("\x1B[D");
+            if (process) process->write("\x1B[D");
             return true;
         }
 
         if (!txt.isEmpty()) {
-            process->write(txt.toLocal8Bit());
+            if (process) process->write(txt.toLocal8Bit());
             return true;
         }
     }
     return QWidget::eventFilter(obj, event);
 }
 
-void TerminalWidget::readOutput() {
+void TerminalPane::readOutput() {
     if (!process || !terminalEdit) return;
     QByteArray data = process->readAllStandardOutput();
     if (data.isEmpty()) return;
 
     QString text = QString::fromLocal8Bit(data);
-    static QRegularExpression ansiRegex("\x1B\\[[0-9;]*[a-zA-Z]");
-    text.remove(ansiRegex);
-
-    QString buffer;
-    for (int i = 0; i < text.length(); ++i) {
-        if (text[i] == '\b') {
-            if (!buffer.isEmpty()) {
-                terminalEdit->moveCursor(QTextCursor::End);
-                terminalEdit->insertPlainText(buffer);
-                buffer.clear();
+    if (text.contains('\b')) {
+        static QRegularExpression ansiRegex("\x1B\\[[0-9;]*[a-zA-Z]");
+        text.remove(ansiRegex);
+        for (int i = 0; i < text.length(); ++i) {
+            if (text[i] == '\b') {
+                QTextCursor cursor = terminalEdit->textCursor();
+                cursor.movePosition(QTextCursor::End);
+                cursor.deletePreviousChar();
+            } else {
+                terminalEdit->insertPlainText(QString(text[i]));
             }
-            QTextCursor cursor = terminalEdit->textCursor();
-            cursor.movePosition(QTextCursor::End);
-            cursor.deletePreviousChar();
-        } else {
-            buffer.append(text[i]);
         }
-    }
-    if (!buffer.isEmpty()) {
+    } else {
+        QString html = ansiToHtml(text);
         terminalEdit->moveCursor(QTextCursor::End);
-        terminalEdit->insertPlainText(buffer);
+        terminalEdit->appendHtml(html);
     }
     terminalEdit->moveCursor(QTextCursor::End);
+}
+
+QString TerminalPane::ansiToHtml(const QString& ansiText) {
+    QString html = ansiText;
+    html.replace("&", "&amp;");
+    html.replace("<", "&lt;");
+    html.replace(">", "&gt;");
+    html.replace("\r", "");
+
+    QRegularExpression regex("\x1B\\[([0-9;]*)m");
+    QRegularExpressionMatchIterator it = regex.globalMatch(html);
+
+    int lastPos = 0;
+    QString result;
+    QString currentStyle;
+    bool inSpan = false;
+
+    while (it.hasNext()) {
+        QRegularExpressionMatch match = it.next();
+        int pos = match.capturedStart();
+
+        QString textSegment = html.mid(lastPos, pos - lastPos);
+        if (inSpan) {
+            result += textSegment + "</span>";
+            inSpan = false;
+        } else {
+            result += textSegment;
+        }
+
+        QString params = match.captured(1);
+        if (params.isEmpty() || params == "0") {
+            currentStyle = "";
+        } else {
+            QStringList codes = params.split(";");
+            QString fgColor, bgColor;
+            bool bold = false;
+
+            for (const QString& code : codes) {
+                int val = code.toInt();
+                if (val == 1) {
+                    bold = true;
+                } else if (val >= 30 && val <= 37) {
+                    switch (val) {
+                        case 30: fgColor = "#282c34"; break;
+                        case 31: fgColor = "#e06c75"; break;
+                        case 32: fgColor = "#98c379"; break;
+                        case 33: fgColor = "#d19a66"; break;
+                        case 34: fgColor = "#61afef"; break;
+                        case 35: fgColor = "#c678dd"; break;
+                        case 36: fgColor = "#56b6c2"; break;
+                        case 37: fgColor = "#abb2bf"; break;
+                    }
+                } else if (val >= 40 && val <= 47) {
+                    switch (val) {
+                        case 40: bgColor = "#282c34"; break;
+                        case 41: bgColor = "#e06c75"; break;
+                        case 42: bgColor = "#98c379"; break;
+                        case 43: bgColor = "#d19a66"; break;
+                        case 44: bgColor = "#61afef"; break;
+                        case 45: bgColor = "#c678dd"; break;
+                        case 46: bgColor = "#56b6c2"; break;
+                        case 47: bgColor = "#abb2bf"; break;
+                    }
+                }
+            }
+
+            currentStyle = "";
+            if (!fgColor.isEmpty()) currentStyle += QString("color: %1;").arg(fgColor);
+            if (!bgColor.isEmpty()) currentStyle += QString("background-color: %1;").arg(bgColor);
+            if (bold) currentStyle += "font-weight: bold;";
+        }
+
+        if (!currentStyle.isEmpty()) {
+            result += QString("<span style=\"%1\">").arg(currentStyle);
+            inSpan = true;
+        }
+
+        lastPos = match.capturedEnd();
+    }
+
+    QString remaining = html.mid(lastPos);
+    if (inSpan) {
+        result += remaining + "</span>";
+    } else {
+        result += remaining;
+    }
+
+    result.replace("\n", "<br>");
+    return result;
+}
+
+TerminalWidget::TerminalWidget(const QString& shellPath, QWidget* parent)
+    : QWidget(parent)
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    rootPane = new TerminalPane(shellPath, nullptr, nullptr, this);
+    layout->addWidget(rootPane);
 }
 """)
 
@@ -2323,6 +2611,8 @@ class TerminalWidget;
 class ProblemsWidget;
 class DebugWidget;
 class QLineEdit;
+class QComboBox;
+class QLabel;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -2344,6 +2634,7 @@ private:
     void openWelcomeTab();
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
+    void updateDocumentDiagnostics();
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -2368,6 +2659,17 @@ private:
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
+
+    QComboBox* cmakeTargetCombo;
+    QComboBox* cmakeBuildTypeCombo;
+
+    struct EditorDiagnostic {
+        QString file;
+        int line;
+        QString message;
+        bool isError;
+    };
+    std::vector<EditorDiagnostic> activeDiagnostics;
 };
 """)
 
@@ -2386,6 +2688,8 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
 #include "GitWidget.hpp"
+#include <QComboBox>
+#include <QLabel>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -2431,6 +2735,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       commandPalette(nullptr),
       pathLineEdit(nullptr),
       cmdLineEdit(nullptr),
+      cmakeTargetCombo(nullptr),
+      cmakeBuildTypeCombo(nullptr),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this))
 {
@@ -2603,6 +2909,31 @@ void EditorWindow::createCentralEditor() {
     containerLayout->addWidget(topControlBar);
     containerLayout->addWidget(mainSplitter);
 
+    // Bottom Status Bar selectors
+    cmakeBuildTypeCombo = new QComboBox(this);
+    cmakeBuildTypeCombo->addItems(QStringList() << "Debug" << "Release" << "RelWithDebInfo" << "MinSizeRel");
+    cmakeBuildTypeCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                       "QComboBox::drop-down { border: none; }"
+                                       "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    cmakeTargetCombo = new QComboBox(this);
+    cmakeTargetCombo->addItems(QStringList() << "ai-ide" << "clean" << "rebuild");
+    cmakeTargetCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                    "QComboBox::drop-down { border: none; }"
+                                    "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    if (statusBar()) {
+        auto* buildLabel = new QLabel("  Config: ", this);
+        buildLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
+        auto* targetLabel = new QLabel("  Target: ", this);
+        targetLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
+        
+        statusBar()->addPermanentWidget(buildLabel);
+        statusBar()->addPermanentWidget(cmakeBuildTypeCombo);
+        statusBar()->addPermanentWidget(targetLabel);
+        statusBar()->addPermanentWidget(cmakeTargetCombo);
+    }
+
     setCentralWidget(container);
 }
 
@@ -2623,6 +2954,8 @@ void EditorWindow::openFileInTab(const QString& path) {
     QString title = path.isEmpty() ? "Untitled" : QFileInfo(path).fileName();
     int idx = tabWidget->addTab(newEditor, title);
     tabWidget->setCurrentIndex(idx);
+
+    updateDocumentDiagnostics();
 }
 
 void EditorWindow::openWelcomeTab() {
@@ -2890,6 +3223,15 @@ void EditorWindow::runBuild() {
     }
     
     buildBuffer.clear();
+    activeDiagnostics.clear();
+
+    // Clear diagnostics on all open editors
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i))) {
+            auto* codeEd = ed->findChild<CodeEditor*>();
+            if (codeEd) codeEd->clearDiagnostics();
+        }
+    }
 
     // Switch to Output Tab
     if (bottomTabWidget) {
@@ -2911,7 +3253,19 @@ void EditorWindow::runBuild() {
     }
     
     buildProcess->setWorkingDirectory(QDir::currentPath());
-    buildProcess->start("python", QStringList() << "build.py");
+
+    QStringList args;
+    args << "build.py";
+    if (cmakeBuildTypeCombo) {
+        args << "--build-type" << cmakeBuildTypeCombo->currentText();
+    }
+    if (cmakeTargetCombo) {
+        QString tgt = cmakeTargetCombo->currentText();
+        if (tgt != "ai-ide") {
+            args << "--target" << tgt;
+        }
+    }
+    buildProcess->start("python", args);
 }
 
 void EditorWindow::readBuildOutput() {
@@ -2968,6 +3322,11 @@ void EditorWindow::parseBuildLine(const QString& line) {
         if (problemsTab) {
             problemsTab->addProblem(severity, file, lineNum, colNum, message);
         }
+
+        // Cache diagnostics
+        bool isError = severity.contains("error", Qt::CaseInsensitive);
+        activeDiagnostics.push_back({file, lineNum, message, isError});
+        updateDocumentDiagnostics();
     }
 }
 
@@ -2985,6 +3344,26 @@ void EditorWindow::gotoLine(const QString& file, int line) {
                 textEdit->setTextCursor(cursor);
                 textEdit->setFocus();
             }
+        }
+    }
+}
+
+void EditorWindow::updateDocumentDiagnostics() {
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i))) {
+            QString edPath = ed->currentFilePath();
+            if (edPath.isEmpty()) continue;
+            
+            auto* codeEd = ed->findChild<CodeEditor*>();
+            if (!codeEd) continue;
+            
+            std::vector<CodeEditor::Diagnostic> fileDiags;
+            for (const auto& diag : activeDiagnostics) {
+                if (QFileInfo(diag.file).absoluteFilePath() == QFileInfo(edPath).absoluteFilePath()) {
+                    fileDiags.push_back({diag.line, diag.message, diag.isError});
+                }
+            }
+            codeEd->setDiagnostics(fileDiags);
         }
     }
 }

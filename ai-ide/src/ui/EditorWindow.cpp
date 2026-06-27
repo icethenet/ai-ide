@@ -13,6 +13,8 @@
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
 #include "GitWidget.hpp"
+#include <QComboBox>
+#include <QLabel>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -58,6 +60,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       commandPalette(nullptr),
       pathLineEdit(nullptr),
       cmdLineEdit(nullptr),
+      cmakeTargetCombo(nullptr),
+      cmakeBuildTypeCombo(nullptr),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this))
 {
@@ -230,6 +234,31 @@ void EditorWindow::createCentralEditor() {
     containerLayout->addWidget(topControlBar);
     containerLayout->addWidget(mainSplitter);
 
+    // Bottom Status Bar selectors
+    cmakeBuildTypeCombo = new QComboBox(this);
+    cmakeBuildTypeCombo->addItems(QStringList() << "Debug" << "Release" << "RelWithDebInfo" << "MinSizeRel");
+    cmakeBuildTypeCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                       "QComboBox::drop-down { border: none; }"
+                                       "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    cmakeTargetCombo = new QComboBox(this);
+    cmakeTargetCombo->addItems(QStringList() << "ai-ide" << "clean" << "rebuild");
+    cmakeTargetCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                    "QComboBox::drop-down { border: none; }"
+                                    "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    if (statusBar()) {
+        auto* buildLabel = new QLabel("  Config: ", this);
+        buildLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
+        auto* targetLabel = new QLabel("  Target: ", this);
+        targetLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
+        
+        statusBar()->addPermanentWidget(buildLabel);
+        statusBar()->addPermanentWidget(cmakeBuildTypeCombo);
+        statusBar()->addPermanentWidget(targetLabel);
+        statusBar()->addPermanentWidget(cmakeTargetCombo);
+    }
+
     setCentralWidget(container);
 }
 
@@ -250,6 +279,8 @@ void EditorWindow::openFileInTab(const QString& path) {
     QString title = path.isEmpty() ? "Untitled" : QFileInfo(path).fileName();
     int idx = tabWidget->addTab(newEditor, title);
     tabWidget->setCurrentIndex(idx);
+
+    updateDocumentDiagnostics();
 }
 
 void EditorWindow::openWelcomeTab() {
@@ -517,6 +548,15 @@ void EditorWindow::runBuild() {
     }
     
     buildBuffer.clear();
+    activeDiagnostics.clear();
+
+    // Clear diagnostics on all open editors
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i))) {
+            auto* codeEd = ed->findChild<CodeEditor*>();
+            if (codeEd) codeEd->clearDiagnostics();
+        }
+    }
 
     // Switch to Output Tab
     if (bottomTabWidget) {
@@ -538,7 +578,19 @@ void EditorWindow::runBuild() {
     }
     
     buildProcess->setWorkingDirectory(QDir::currentPath());
-    buildProcess->start("python", QStringList() << "build.py");
+
+    QStringList args;
+    args << "build.py";
+    if (cmakeBuildTypeCombo) {
+        args << "--build-type" << cmakeBuildTypeCombo->currentText();
+    }
+    if (cmakeTargetCombo) {
+        QString tgt = cmakeTargetCombo->currentText();
+        if (tgt != "ai-ide") {
+            args << "--target" << tgt;
+        }
+    }
+    buildProcess->start("python", args);
 }
 
 void EditorWindow::readBuildOutput() {
@@ -595,6 +647,11 @@ void EditorWindow::parseBuildLine(const QString& line) {
         if (problemsTab) {
             problemsTab->addProblem(severity, file, lineNum, colNum, message);
         }
+
+        // Cache diagnostics
+        bool isError = severity.contains("error", Qt::CaseInsensitive);
+        activeDiagnostics.push_back({file, lineNum, message, isError});
+        updateDocumentDiagnostics();
     }
 }
 
@@ -612,6 +669,26 @@ void EditorWindow::gotoLine(const QString& file, int line) {
                 textEdit->setTextCursor(cursor);
                 textEdit->setFocus();
             }
+        }
+    }
+}
+
+void EditorWindow::updateDocumentDiagnostics() {
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i))) {
+            QString edPath = ed->currentFilePath();
+            if (edPath.isEmpty()) continue;
+            
+            auto* codeEd = ed->findChild<CodeEditor*>();
+            if (!codeEd) continue;
+            
+            std::vector<CodeEditor::Diagnostic> fileDiags;
+            for (const auto& diag : activeDiagnostics) {
+                if (QFileInfo(diag.file).absoluteFilePath() == QFileInfo(edPath).absoluteFilePath()) {
+                    fileDiags.push_back({diag.line, diag.message, diag.isError});
+                }
+            }
+            codeEd->setDiagnostics(fileDiags);
         }
     }
 }

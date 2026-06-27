@@ -21,6 +21,8 @@ class TerminalWidget;
 class ProblemsWidget;
 class DebugWidget;
 class QLineEdit;
+class QComboBox;
+class QLabel;
 
 class EditorWindow : public QMainWindow {
     Q_OBJECT
@@ -42,6 +44,7 @@ private:
     void openWelcomeTab();
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
+    void updateDocumentDiagnostics();
 
     QTabWidget* tabWidget;
     QTabWidget* bottomTabWidget;
@@ -66,4 +69,15 @@ private:
     ClipboardListener* clipboardListener;
     QStringListModel* historyModel;
     QString buildBuffer;
+
+    QComboBox* cmakeTargetCombo;
+    QComboBox* cmakeBuildTypeCombo;
+
+    struct EditorDiagnostic {
+        QString file;
+        int line;
+        QString message;
+        bool isError;
+    };
+    std::vector<EditorDiagnostic> activeDiagnostics;
 };

@@ -39,6 +39,14 @@ public:
     void lineNumberAreaPaintEvent(QPaintEvent* event);
     int lineNumberAreaWidth();
 
+    struct Diagnostic {
+        int line;
+        QString message;
+        bool isError;
+    };
+    void setDiagnostics(const std::vector<Diagnostic>& diags);
+    void clearDiagnostics();
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
 
@@ -48,6 +56,8 @@ private slots:
     void updateLineNumberArea(const QRect& rect, int dy);
 
 private:
+    void highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections);
+
     QWidget* lineNumberArea;
     QString filePath;
     QTimer* diffTimer;
@@ -56,6 +66,7 @@ private:
         char type; // 'A', 'M', 'D'
     };
     std::vector<DiffLine> diffLines;
+    std::vector<Diagnostic> diagnostics;
 };
 
 class LineNumberArea : public QWidget {

@@ -67,6 +67,11 @@ print("\n=== CONFIGURING PROJECT WITH CMAKE + NINJA ===\n")
 os.makedirs(BUILD_DIR, exist_ok=True)
 os.chdir(BUILD_DIR)
 
+build_type = "Debug"
+for i, arg in enumerate(sys.argv):
+    if arg == "--build-type" and i + 1 < len(sys.argv):
+        build_type = sys.argv[i + 1]
+
 config = [
     "cmake",
     "-G", "Ninja",
@@ -74,6 +79,7 @@ config = [
     "-DCMAKE_CXX_COMPILER=clang++",
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     f"-DCMAKE_PREFIX_PATH={QT_PATH}",
+    f"-DCMAKE_BUILD_TYPE={build_type}",
     SOURCE_DIR
 ]
 
@@ -83,7 +89,18 @@ if subprocess.call(config) != 0:
 
 print("\n=== BUILDING PROJECT ===\n")
 
-if subprocess.call(["cmake", "--build", "."]) == 0:
+target = None
+for i, arg in enumerate(sys.argv):
+    if arg == "--target" and i + 1 < len(sys.argv):
+        target = sys.argv[i + 1]
+
+build_cmd = ["cmake", "--build", "."]
+if target == "clean":
+    build_cmd += ["--target", "clean"]
+elif target == "rebuild":
+    subprocess.call(["cmake", "--build", ".", "--target", "clean"])
+
+if subprocess.call(build_cmd) == 0:
     print("\n=== BUILD SUCCESSFUL ===")
     
     # Optional: Run the app immediately

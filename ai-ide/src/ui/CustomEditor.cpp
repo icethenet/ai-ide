@@ -154,6 +154,34 @@ void CodeEditor::resizeEvent(QResizeEvent* event) {
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
 }
 
+void CodeEditor::setDiagnostics(const std::vector<Diagnostic>& diags) {
+    diagnostics = diags;
+    highlightCurrentLine();
+}
+
+void CodeEditor::clearDiagnostics() {
+    diagnostics.clear();
+    highlightCurrentLine();
+}
+
+void CodeEditor::highlightDiagnostics(QList<QTextEdit::ExtraSelection>& selections) {
+    for (const auto& diag : diagnostics) {
+        QTextBlock block = document()->findBlockByNumber(diag.line - 1);
+        if (block.isValid()) {
+            QTextEdit::ExtraSelection selection;
+            selection.cursor = QTextCursor(block);
+            selection.cursor.select(QTextCursor::LineUnderCursor);
+            
+            QTextCharFormat format;
+            format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+            format.setUnderlineColor(diag.isError ? Qt::red : QColor(209, 154, 102));
+            selection.format = format;
+            
+            selections.append(selection);
+        }
+    }
+}
+
 void CodeEditor::highlightCurrentLine() {
     QList<QTextEdit::ExtraSelection> extraSelections;
 
@@ -166,6 +194,8 @@ void CodeEditor::highlightCurrentLine() {
         selection.cursor.clearSelection();
         extraSelections.append(selection);
     }
+
+    highlightDiagnostics(extraSelections);
 
     setExtraSelections(extraSelections);
 }
