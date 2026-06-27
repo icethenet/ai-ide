@@ -1,0 +1,383 @@
+AI‑IDE Master Build Plan
+(Architecture, Modules, Data Structures, and Development Phases)
+
+1. Core Goals
+Build a C++ AI‑powered IDE with:
+
+Full text editor (undo/redo, diff, syntax, LSP).
+
+Differential editor for AI patches.
+
+File browser (local + remote).
+
+AI orchestration (Ollama local + Gemini + Claude + Copilot).
+
+Action logging + reversible AI changes.
+
+Prompt rewriting + re‑run.
+
+Git integration.
+
+Time‑travel features (snapshots, history, persistent undo).
+
+2. High‑Level Architecture
+2.1 UI Layer
+Framework: Qt (recommended) or Dear ImGui.
+
+Components:
+
+Editor view
+
+Diff view
+
+File browser
+
+AI chat panel
+
+AI action history panel
+
+Git panel
+
+Settings UI
+
+2.2 Core Document Model
+Rope or gap buffer for scalable editing.
+
+Undo/redo command stack.
+
+Snapshots + persistent undo log.
+
+Diff engine (Myers algorithm or existing library).
+
+2.3 Language Intelligence
+LSP client (JSON‑RPC).
+
+Features:
+
+Diagnostics
+
+Completion
+
+Hover
+
+Go‑to‑definition
+
+Code actions
+
+Rename symbol
+
+2.4 File System Abstraction
+IFileSystem interface:
+
+list(path)
+
+stat(path)
+
+readFile(path)
+
+writeFile(path)
+
+delete(path)
+
+mkdir(path)
+
+Implementations:
+
+LocalFileSystem
+
+SSHFileSystem (SFTP)
+
+Future: HTTPFileSystem for remote agents
+
+2.5 AI Orchestration Layer
+Provider‑agnostic interface:
+
+AIProvider::send(AIRequest) -> AIResponse
+
+Providers:
+
+Ollama (192.168.1.162:11434)
+
+Gemini
+
+Claude
+
+Copilot
+
+Routing engine:
+
+Autocomplete → local
+
+Refactor → cloud
+
+Offline mode → local only
+
+2.6 Patch Engine
+Converts AI output → structured patch.
+
+Applies patch to document.
+
+Reverts patch using stored oldText/newText.
+
+Handles conflicts via diff view.
+
+2.7 AI Action Log
+Persistent SQLite or JSON log.
+
+Stores:
+
+Prompt
+
+Model/provider
+
+Patch
+
+Context summary
+
+Timestamp
+
+Status (applied/reverted)
+
+2.8 Git Integration
+Status, diff, commit, push.
+
+AI‑aware commit messages.
+
+History view.
+
+2.9 Time‑Travel System
+Persistent undo log.
+
+Manual snapshots.
+
+Timeline UI.
+
+Git history integration.
+
+3. Core Data Structures
+3.1 Patch
+Code
+struct PatchEdit {
+    Range range;
+    std::string oldText;
+    std::string newText;
+};
+
+struct Patch {
+    std::string filePath;
+    std::vector<PatchEdit> edits;
+};
+3.2 AIAction
+Code
+struct AIAction {
+    std::string id;
+    std::string provider;
+    std::string model;
+    std::string prompt;
+    std::string contextSummary;
+    std::vector<Patch> patches;
+    std::string timestamp;
+    bool applied;
+};
+3.3 AIRequest / AIResponse
+Code
+struct AIRequest {
+    std::string mode; // autocomplete, refactor, explain, etc.
+    std::string prompt;
+    std::string fileContext;
+    std::string selection;
+    bool streaming;
+};
+
+struct AIResponse {
+    std::string text;
+    std::optional<Patch> patch;
+};
+4. Major Features
+4.1 Differential Editor
+Side‑by‑side or inline diff.
+
+Accept/reject per hunk.
+
+Used for:
+
+AI patches
+
+Git diffs
+
+Snapshot comparisons
+
+4.2 File Browser
+Local + remote.
+
+Tree view.
+
+Context menu:
+
+New file/folder
+
+Rename
+
+Delete
+
+Open in terminal
+
+Ask AI about this file/folder
+
+4.3 AI Chat Panel
+Context chips:
+
+@file
+
+@selection
+
+@project
+
+@diff
+
+Buttons:
+
+Apply patch
+
+Show diff
+
+Rewrite prompt
+
+Re‑run
+
+4.4 AI Action History
+List of all AI actions.
+
+For each:
+
+View prompt
+
+View diff
+
+Revert
+
+Re‑run with edited prompt
+
+4.5 Git Panel
+Status
+
+Staging
+
+Commit
+
+Push
+
+History
+
+Diff vs commit
+
+AI explanations of commits
+
+5. Development Phases
+Phase 1 — Core Editor
+Document model
+
+Undo/redo
+
+Syntax highlighting
+
+Basic file open/save
+
+Tabs
+
+Phase 2 — File Browser + LSP
+Local file browser
+
+LSP client
+
+Diagnostics, completion, hover
+
+Phase 3 — Diff Engine
+Patch engine
+
+Diff view
+
+Accept/reject hunks
+
+Phase 4 — AI Integration (Local First)
+AIRequest/AIResponse
+
+Ollama provider
+
+Inline completion
+
+Chat panel
+
+Apply patch → diff → accept
+
+Phase 5 — AI Action Log + Reversible Changes
+AIAction log
+
+Revert engine
+
+Prompt rewrite + re‑run
+
+Phase 6 — Remote Workspaces
+SSHFileSystem
+
+Remote file browser
+
+Remote AI nodes
+
+Phase 7 — Git Integration
+Status, diff, commit, push
+
+AI commit messages
+
+History view
+
+Phase 8 — Time‑Travel System
+Persistent undo
+
+Snapshots
+
+Timeline UI
+
+Git + AI history merge
+
+Phase 9 — Polish & Extensions
+Settings UI
+
+Plugin API
+
+Theming
+
+Performance tuning
+
+6. Things You Didn’t Think Of (But You’ll Want)
+AI Safety Layer
+
+Prevent AI from writing outside workspace.
+
+Confirm before deleting files.
+
+AI Rate Limiting
+
+Prevent accidental spam to cloud providers.
+
+Model Benchmarking
+
+Compare latency/quality of local vs cloud.
+
+Session Replay
+
+Replay AI actions + edits for debugging.
+
+Crash Recovery
+
+Auto‑save + restore unsaved buffers.
+
+Project Indexing
+
+Symbol search
+
+Fast text search (ripgrep integration)
+
+AI Context Budget Manager
+
+Automatically trims context to fit model limits.

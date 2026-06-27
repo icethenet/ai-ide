@@ -1,0 +1,9 @@
+ai-ide/build/
+.agents/
+.antigravity/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
