@@ -34,6 +34,8 @@ class CodeEditor : public QPlainTextEdit {
 public:
     explicit CodeEditor(QWidget* parent = nullptr);
 
+    void setFilePath(const QString& path);
+    void updateGitDiff();
     void lineNumberAreaPaintEvent(QPaintEvent* event);
     int lineNumberAreaWidth();
 
@@ -47,6 +49,13 @@ private slots:
 
 private:
     QWidget* lineNumberArea;
+    QString filePath;
+    QTimer* diffTimer;
+    struct DiffLine {
+        int line;
+        char type; // 'A', 'M', 'D'
+    };
+    std::vector<DiffLine> diffLines;
 };
 
 class LineNumberArea : public QWidget {

@@ -11,6 +11,8 @@
 #include "DebugWidget.hpp"
 #include "WelcomeWidget.hpp"
 #include "CommandPalette.hpp"
+#include "SearchWidget.hpp"
+#include "GitWidget.hpp"
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -49,6 +51,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       historyView(nullptr),
       buildProcess(nullptr),
       fileBrowser(nullptr),
+      searchWidget(nullptr),
+      gitWidget(nullptr),
       aiPatchController(nullptr),
       commandPalette(nullptr),
       pathLineEdit(nullptr),
@@ -358,11 +362,24 @@ bool EditorWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void EditorWindow::createDocks() {
-    // File Browser (Left)
-    auto* fileDock = new QDockWidget("Files", this);
-    fileBrowser = new FileBrowser(fileDock);
-    fileDock->setWidget(fileBrowser);
-    fileDock->setMinimumWidth(250);
+    // File Browser / Explorer Dock (Left)
+    auto* fileDock = new QDockWidget("Explorer", this);
+    fileDock->setMinimumWidth(280);
+    
+    auto* leftTabs = new QTabWidget(fileDock);
+    leftTabs->setStyleSheet("QTabWidget::pane { border: none; }"
+                            "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 8px 12px; font-family: 'Segoe UI', Arial; }"
+                            "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
+
+    fileBrowser = new FileBrowser(leftTabs);
+    searchWidget = new SearchWidget(leftTabs);
+    gitWidget = new GitWidget(leftTabs);
+
+    leftTabs->addTab(fileBrowser, "Files");
+    leftTabs->addTab(searchWidget, "Search");
+    leftTabs->addTab(gitWidget, "Git");
+
+    fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
 
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
@@ -371,7 +388,11 @@ void EditorWindow::createDocks() {
 
     connect(fileBrowser, &FileBrowser::rootChanged, this, [this](const QString& path) {
         if (pathLineEdit) pathLineEdit->setText(path);
+        if (searchWidget) searchWidget->setRootPath(path);
+        if (gitWidget) gitWidget->setRootPath(path);
     });
+
+    connect(searchWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);

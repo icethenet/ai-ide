@@ -49,6 +49,7 @@ void CustomEditor::openFile(const QString& path) {
     QTextStream in(&f);
     editor->setPlainText(in.readAll());
     filePath = path;
+    editor->setFilePath(path);
 }
 
 void CustomEditor::saveFile() {
@@ -81,21 +82,37 @@ void CustomEditor::saveAsFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    editor->setFilePath(fileName);
 }
 
 QString CustomEditor::currentFilePath() const {
     return filePath;
 }
 
+#include <QTimer>
+#include <QProcess>
+
 // ---------------------------------------------------------
 // CodeEditor Implementation
 // ---------------------------------------------------------
-CodeEditor::CodeEditor(QWidget* parent) : QPlainTextEdit(parent) {
+CodeEditor::CodeEditor(QWidget* parent)
+    : QPlainTextEdit(parent),
+      lineNumberArea(nullptr),
+      diffTimer(nullptr)
+{
     lineNumberArea = new LineNumberArea(this);
+
+    diffTimer = new QTimer(this);
+    diffTimer->setSingleShot(true);
+    connect(diffTimer, &QTimer::timeout, this, &CodeEditor::updateGitDiff);
 
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
+
+    connect(this, &QPlainTextEdit::textChanged, this, [this]() {
+        if (diffTimer) diffTimer->start(2000);
+    });
 
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
@@ -157,6 +174,8 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
     QPainter painter(lineNumberArea);
     painter.fillRect(event->rect(), QColor(33, 37, 43));
 
+    // Draw Git diff color bars on the left edge of the gutter
+    int markerWidth = 3;
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
     int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).y());
@@ -168,6 +187,19 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
             painter.setPen(QColor(92, 99, 112));
             painter.drawText(0, top, lineNumberArea->width() - 5, fontMetrics().height(),
                              Qt::AlignRight | Qt::AlignVCenter, number);
+            
+            // Match git lines
+            for (const auto& dl : diffLines) {
+                if (dl.line == blockNumber + 1) {
+                    QColor color;
+                    if (dl.type == 'A') color = QColor(152, 195, 121); // Green
+                    else if (dl.type == 'M') color = QColor(97, 175, 239); // Blue
+                    else if (dl.type == 'D') color = QColor(224, 108, 117); // Red
+                    
+                    painter.fillRect(QRect(0, top, markerWidth, bottom - top), color);
+                    break;
+                }
+            }
         }
 
         block = block.next();
@@ -175,4 +207,52 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
         bottom = top + qRound(blockBoundingRect(block).height());
         blockNumber++;
     }
+}
+
+void CodeEditor::setFilePath(const QString& path) {
+    filePath = path;
+    updateGitDiff();
+}
+
+void CodeEditor::updateGitDiff() {
+    diffLines.clear();
+    if (filePath.isEmpty()) return;
+
+    QFileInfo info(filePath);
+    QString dir = info.dir().absolutePath();
+    QString fileName = info.fileName();
+
+    auto* proc = new QProcess();
+    proc->setWorkingDirectory(dir);
+    
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc](int exitCode) {
+        if (exitCode == 0) {
+            QString out = proc->readAllStandardOutput();
+            QStringList lines = out.split("\n", Qt::SkipEmptyParts);
+            
+            QRegularExpression regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@");
+            for (const QString& line : lines) {
+                auto match = regex.match(line);
+                if (match.hasMatch()) {
+                    int oldStart = match.captured(1).toInt();
+                    int oldLen = match.captured(2).isEmpty() ? 1 : match.captured(2).toInt();
+                    int newStart = match.captured(3).toInt();
+                    int newLen = match.captured(4).isEmpty() ? 1 : match.captured(4).toInt();
+                    
+                    if (newLen == 0) {
+                        diffLines.push_back({newStart, 'D'});
+                    } else {
+                        char type = (oldLen > 0) ? 'M' : 'A';
+                        for (int l = 0; l < newLen; ++l) {
+                            diffLines.push_back({newStart + l, type});
+                        }
+                    }
+                }
+            }
+            if (lineNumberArea) lineNumberArea->update();
+        }
+        proc->deleteLater();
+    });
+    
+    proc->start("git", QStringList() << "diff" << "-U0" << fileName);
 }

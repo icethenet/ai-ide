@@ -334,6 +334,351 @@ void AIChatPanel::sendPrompt() {
 """)
 
 # ---------------------------------------------------------
+# Workspace Search Widget (Asynchronous file scanning)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/SearchWidget.hpp", r"""#pragma once
+#include <QWidget>
+#include <QLineEdit>
+#include <QTreeWidget>
+#include <QThread>
+
+class SearchThread : public QThread {
+    Q_OBJECT
+public:
+    SearchThread(const QString& rootPath, const QString& query, QObject* parent = nullptr);
+protected:
+    void run() override;
+signals:
+    void matchFound(const QString& filePath, int lineNumber, const QString& lineContent);
+private:
+    QString root;
+    QString q;
+};
+
+class SearchWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit SearchWidget(QWidget* parent = nullptr);
+    void setRootPath(const QString& path);
+
+signals:
+    void matchActivated(const QString& filePath, int lineNumber);
+
+private slots:
+    void startSearch();
+    void addMatch(const QString& filePath, int lineNumber, const QString& lineContent);
+    void onDoubleClicked(QTreeWidgetItem* item, int column);
+
+private:
+    QString rootPath;
+    QLineEdit* searchEdit;
+    QTreeWidget* resultsTree;
+    SearchThread* activeThread;
+};
+""")
+
+write(f"{ROOT}/src/ui/SearchWidget.cpp", r"""#include "SearchWidget.hpp"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QDirIterator>
+#include <QFile>
+#include <QTextStream>
+#include <QFileInfo>
+
+SearchThread::SearchThread(const QString& rootPath, const QString& query, QObject* parent)
+    : QThread(parent), root(rootPath), q(query) {}
+
+void SearchThread::run() {
+    if (root.isEmpty() || q.isEmpty()) return;
+    
+    QDirIterator it(root, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        if (isInterruptionRequested()) break;
+        QString path = it.next();
+        
+        if (path.contains("/.git/") || path.contains("/build/") || path.contains("/.agents/") || path.contains("/.antigravity/")) {
+            continue;
+        }
+        
+        QFileInfo info(path);
+        QString ext = info.suffix().toLower();
+        if (ext != "cpp" && ext != "hpp" && ext != "h" && ext != "txt" && ext != "md" && ext != "py" && ext != "json" && ext != "cmake") {
+            continue;
+        }
+
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            int lineNum = 0;
+            while (!in.atEnd()) {
+                if (isInterruptionRequested()) break;
+                lineNum++;
+                QString line = in.readLine();
+                if (line.contains(q, Qt::CaseInsensitive)) {
+                    emit matchFound(path, lineNum, line.trimmed());
+                }
+            }
+        }
+    }
+}
+
+SearchWidget::SearchWidget(QWidget* parent)
+    : QWidget(parent), activeThread(nullptr)
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(5, 5, 5, 5);
+
+    auto* searchBar = new QHBoxLayout();
+    searchEdit = new QLineEdit(this);
+    searchEdit->setPlaceholderText("Search in workspace...");
+    searchEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px; font-family: 'Segoe UI', Arial; }");
+    
+    auto* searchBtn = new QPushButton("Find", this);
+    searchBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; }"
+                             "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+    
+    searchBar->addWidget(searchEdit);
+    searchBar->addWidget(searchBtn);
+    layout->addLayout(searchBar);
+
+    resultsTree = new QTreeWidget(this);
+    resultsTree->setHeaderLabel("Search Results");
+    resultsTree->setStyleSheet("QTreeWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; }"
+                               "QTreeWidget::item:hover { background-color: #2c313c; }"
+                               "QTreeWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+    layout->addWidget(resultsTree);
+
+    connect(searchEdit, &QLineEdit::returnPressed, this, &SearchWidget::startSearch);
+    connect(searchBtn, &QPushButton::clicked, this, &SearchWidget::startSearch);
+    connect(resultsTree, &QTreeWidget::itemDoubleClicked, this, &SearchWidget::onDoubleClicked);
+}
+
+void SearchWidget::setRootPath(const QString& path) {
+    rootPath = path;
+}
+
+void SearchWidget::startSearch() {
+    if (activeThread) {
+        activeThread->requestInterruption();
+        activeThread->wait();
+        delete activeThread;
+        activeThread = nullptr;
+    }
+
+    resultsTree->clear();
+    QString query = searchEdit->text().trimmed();
+    if (query.isEmpty() || rootPath.isEmpty()) return;
+
+    activeThread = new SearchThread(rootPath, query, this);
+    connect(activeThread, &SearchThread::matchFound, this, &SearchWidget::addMatch);
+    activeThread->start();
+}
+
+void SearchWidget::addMatch(const QString& filePath, int lineNumber, const QString& lineContent) {
+    QList<QTreeWidgetItem*> items = resultsTree->findItems(filePath, Qt::MatchExactly, 0);
+    QTreeWidgetItem* parentItem = nullptr;
+    
+    if (items.isEmpty()) {
+        parentItem = new QTreeWidgetItem(resultsTree);
+        parentItem->setText(0, filePath);
+        parentItem->setToolTip(0, filePath);
+    } else {
+        parentItem = items.first();
+    }
+
+    auto* childItem = new QTreeWidgetItem(parentItem);
+    childItem->setText(0, QString::number(lineNumber) + ": " + lineContent);
+    childItem->setData(0, Qt::UserRole, filePath);
+    childItem->setData(0, Qt::UserRole + 1, lineNumber);
+    
+    parentItem->setExpanded(true);
+}
+
+void SearchWidget::onDoubleClicked(QTreeWidgetItem* item, int /* column */) {
+    QVariant fileVal = item->data(0, Qt::UserRole);
+    QVariant lineVal = item->data(0, Qt::UserRole + 1);
+    if (fileVal.isValid() && lineVal.isValid()) {
+        emit matchActivated(fileVal.toString(), lineVal.toInt());
+    }
+}
+""")
+
+# ---------------------------------------------------------
+# Git Control Widget (Visual staging and commits)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/GitWidget.hpp", r"""#pragma once
+#include <QWidget>
+#include <QListWidget>
+#include <QLineEdit>
+#include <QProcess>
+
+class GitWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit GitWidget(QWidget* parent = nullptr);
+    void setRootPath(const QString& path);
+
+private slots:
+    void refreshStatus();
+    void commitChanges();
+    void syncChanges();
+    void onProcessFinished(int exitCode);
+
+private:
+    QString rootPath;
+    QListWidget* statusList;
+    QLineEdit* commitMessageEdit;
+    QProcess* gitProcess;
+    QString currentMode;
+    QStringList filesToStage;
+};
+""")
+
+write(f"{ROOT}/src/ui/GitWidget.cpp", r"""#include "GitWidget.hpp"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QMessageBox>
+
+GitWidget::GitWidget(QWidget* parent)
+    : QWidget(parent), gitProcess(new QProcess(this))
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(5, 5, 5, 5);
+
+    auto* toolbar = new QHBoxLayout();
+    auto* refreshBtn = new QPushButton("🔄 Refresh", this);
+    auto* syncBtn = new QPushButton("🚀 Sync", this);
+    
+    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }"
+                       "QPushButton:hover { background-color: #3e4452; color: #ffffff; }";
+    refreshBtn->setStyleSheet(btnStyle);
+    syncBtn->setStyleSheet(btnStyle);
+
+    toolbar->addWidget(refreshBtn);
+    toolbar->addWidget(syncBtn);
+    layout->addLayout(toolbar);
+
+    statusList = new QListWidget(this);
+    statusList->setStyleSheet("QListWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; }"
+                              "QListWidget::item { padding: 4px; }");
+    layout->addWidget(statusList);
+
+    commitMessageEdit = new QLineEdit(this);
+    commitMessageEdit->setPlaceholderText("Commit message...");
+    commitMessageEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }");
+    layout->addWidget(commitMessageEdit);
+
+    auto* commitBtn = new QPushButton("Commit Staged Changes", this);
+    commitBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 8px; font-weight: bold; font-family: 'Segoe UI', Arial; }"
+                             "QPushButton:hover { background-color: #528bff; }");
+    layout->addWidget(commitBtn);
+
+    connect(refreshBtn, &QPushButton::clicked, this, &GitWidget::refreshStatus);
+    connect(syncBtn, &QPushButton::clicked, this, &GitWidget::syncChanges);
+    connect(commitBtn, &QPushButton::clicked, this, &GitWidget::commitChanges);
+    connect(gitProcess, &QProcess::finished, this, &GitWidget::onProcessFinished);
+}
+
+void GitWidget::setRootPath(const QString& path) {
+    rootPath = path;
+    refreshStatus();
+}
+
+void GitWidget::refreshStatus() {
+    if (rootPath.isEmpty() || gitProcess->state() != QProcess::NotRunning) return;
+
+    statusList->clear();
+    currentMode = "status";
+    gitProcess->setWorkingDirectory(rootPath);
+    gitProcess->start("git", QStringList() << "status" << "--porcelain");
+}
+
+void GitWidget::commitChanges() {
+    if (rootPath.isEmpty() || gitProcess->state() != QProcess::NotRunning) return;
+
+    QString msg = commitMessageEdit->text().trimmed();
+    if (msg.isEmpty()) {
+        QMessageBox::warning(this, "Git Commit", "Please enter a commit message.");
+        return;
+    }
+
+    filesToStage.clear();
+    for (int i = 0; i < statusList->count(); ++i) {
+        auto* item = statusList->item(i);
+        if (item->checkState() == Qt::Checked) {
+            filesToStage.append(item->text().mid(3).trimmed());
+        }
+    }
+
+    if (filesToStage.isEmpty()) {
+        QMessageBox::warning(this, "Git Commit", "No changes selected to stage/commit.");
+        return;
+    }
+
+    currentMode = "add";
+    gitProcess->setWorkingDirectory(rootPath);
+    QStringList args;
+    args << "add";
+    args.append(filesToStage);
+    gitProcess->start("git", args);
+}
+
+void GitWidget::syncChanges() {
+    if (rootPath.isEmpty() || gitProcess->state() != QProcess::NotRunning) return;
+
+    currentMode = "sync";
+    gitProcess->setWorkingDirectory(rootPath);
+    gitProcess->start("git", QStringList() << "pull" << "--rebase");
+}
+
+void GitWidget::onProcessFinished(int exitCode) {
+    if (currentMode == "status") {
+        if (exitCode == 0) {
+            QString out = gitProcess->readAllStandardOutput();
+            QStringList lines = out.split("\n", Qt::SkipEmptyParts);
+            for (const QString& line : lines) {
+                auto* item = new QListWidgetItem(statusList);
+                item->setText(line);
+                item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+                item->setCheckState(Qt::Checked);
+            }
+        } else {
+            auto* item = new QListWidgetItem(statusList);
+            item->setText("Not a git repository (or git not found)");
+        }
+    } else if (currentMode == "add") {
+        if (exitCode == 0) {
+            currentMode = "commit";
+            QString msg = commitMessageEdit->text().trimmed();
+            gitProcess->start("git", QStringList() << "commit" << "-m" << msg);
+        } else {
+            QMessageBox::critical(this, "Git Add Error", gitProcess->readAllStandardError());
+        }
+    } else if (currentMode == "commit") {
+        commitMessageEdit->clear();
+        refreshStatus();
+        QMessageBox::information(this, "Git Commit", "Commit completed successfully!");
+    } else if (currentMode == "sync") {
+        if (exitCode == 0) {
+            currentMode = "push";
+            gitProcess->start("git", QStringList() << "push");
+        } else {
+            QMessageBox::critical(this, "Git Sync Error", "Pull failed: " + gitProcess->readAllStandardError());
+        }
+    } else if (currentMode == "push") {
+        refreshStatus();
+        if (exitCode == 0) {
+            QMessageBox::information(this, "Git Sync", "Push completed successfully! Repository is synchronized.");
+        } else {
+            QMessageBox::critical(this, "Git Sync Error", "Push failed: " + gitProcess->readAllStandardError());
+        }
+    }
+}
+""")
+
+# ---------------------------------------------------------
 # C++ Syntax Highlighter
 # ---------------------------------------------------------
 write(f"{ROOT}/src/ui/CppHighlighter.hpp", r"""#pragma once
@@ -640,6 +985,8 @@ class CodeEditor : public QPlainTextEdit {
 public:
     explicit CodeEditor(QWidget* parent = nullptr);
 
+    void setFilePath(const QString& path);
+    void updateGitDiff();
     void lineNumberAreaPaintEvent(QPaintEvent* event);
     int lineNumberAreaWidth();
 
@@ -653,6 +1000,13 @@ private slots:
 
 private:
     QWidget* lineNumberArea;
+    QString filePath;
+    QTimer* diffTimer;
+    struct DiffLine {
+        int line;
+        char type; // 'A', 'M', 'D'
+    };
+    std::vector<DiffLine> diffLines;
 };
 
 class LineNumberArea : public QWidget {
@@ -724,6 +1078,7 @@ void CustomEditor::openFile(const QString& path) {
     QTextStream in(&f);
     editor->setPlainText(in.readAll());
     filePath = path;
+    editor->setFilePath(path);
 }
 
 void CustomEditor::saveFile() {
@@ -756,21 +1111,37 @@ void CustomEditor::saveAsFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    editor->setFilePath(fileName);
 }
 
 QString CustomEditor::currentFilePath() const {
     return filePath;
 }
 
+#include <QTimer>
+#include <QProcess>
+
 // ---------------------------------------------------------
 // CodeEditor Implementation
 // ---------------------------------------------------------
-CodeEditor::CodeEditor(QWidget* parent) : QPlainTextEdit(parent) {
+CodeEditor::CodeEditor(QWidget* parent)
+    : QPlainTextEdit(parent),
+      lineNumberArea(nullptr),
+      diffTimer(nullptr)
+{
     lineNumberArea = new LineNumberArea(this);
+
+    diffTimer = new QTimer(this);
+    diffTimer->setSingleShot(true);
+    connect(diffTimer, &QTimer::timeout, this, &CodeEditor::updateGitDiff);
 
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
+
+    connect(this, &QPlainTextEdit::textChanged, this, [this]() {
+        if (diffTimer) diffTimer->start(2000);
+    });
 
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
@@ -832,6 +1203,8 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
     QPainter painter(lineNumberArea);
     painter.fillRect(event->rect(), QColor(33, 37, 43));
 
+    // Draw Git diff color bars on the left edge of the gutter
+    int markerWidth = 3;
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
     int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).y());
@@ -843,6 +1216,19 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
             painter.setPen(QColor(92, 99, 112));
             painter.drawText(0, top, lineNumberArea->width() - 5, fontMetrics().height(),
                              Qt::AlignRight | Qt::AlignVCenter, number);
+            
+            // Match git lines
+            for (const auto& dl : diffLines) {
+                if (dl.line == blockNumber + 1) {
+                    QColor color;
+                    if (dl.type == 'A') color = QColor(152, 195, 121); // Green
+                    else if (dl.type == 'M') color = QColor(97, 175, 239); // Blue
+                    else if (dl.type == 'D') color = QColor(224, 108, 117); // Red
+                    
+                    painter.fillRect(QRect(0, top, markerWidth, bottom - top), color);
+                    break;
+                }
+            }
         }
 
         block = block.next();
@@ -850,6 +1236,54 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* event) {
         bottom = top + qRound(blockBoundingRect(block).height());
         blockNumber++;
     }
+}
+
+void CodeEditor::setFilePath(const QString& path) {
+    filePath = path;
+    updateGitDiff();
+}
+
+void CodeEditor::updateGitDiff() {
+    diffLines.clear();
+    if (filePath.isEmpty()) return;
+
+    QFileInfo info(filePath);
+    QString dir = info.dir().absolutePath();
+    QString fileName = info.fileName();
+
+    auto* proc = new QProcess();
+    proc->setWorkingDirectory(dir);
+    
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc](int exitCode) {
+        if (exitCode == 0) {
+            QString out = proc->readAllStandardOutput();
+            QStringList lines = out.split("\n", Qt::SkipEmptyParts);
+            
+            QRegularExpression regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@");
+            for (const QString& line : lines) {
+                auto match = regex.match(line);
+                if (match.hasMatch()) {
+                    int oldStart = match.captured(1).toInt();
+                    int oldLen = match.captured(2).isEmpty() ? 1 : match.captured(2).toInt();
+                    int newStart = match.captured(3).toInt();
+                    int newLen = match.captured(4).isEmpty() ? 1 : match.captured(4).toInt();
+                    
+                    if (newLen == 0) {
+                        diffLines.push_back({newStart, 'D'});
+                    } else {
+                        char type = (oldLen > 0) ? 'M' : 'A';
+                        for (int l = 0; l < newLen; ++l) {
+                            diffLines.push_back({newStart + l, type});
+                        }
+                    }
+                }
+            }
+            if (lineNumberArea) lineNumberArea->update();
+        }
+        proc->deleteLater();
+    });
+    
+    proc->start("git", QStringList() << "diff" << "-U0" << fileName);
 }
 """)
 
@@ -1869,6 +2303,8 @@ write(f"{ROOT}/src/ui/EditorWindow.hpp", r"""#pragma once
 
 class CustomEditor;
 class FileBrowser;
+class SearchWidget;
+class GitWidget;
 class WelcomeWidget;
 class AIPatchController;
 class CommandPalette;
@@ -1918,6 +2354,8 @@ private:
 
     CustomEditor* editor;
     FileBrowser* fileBrowser;
+    SearchWidget* searchWidget;
+    GitWidget* gitWidget;
     AIPatchController* aiPatchController;
     CommandPalette* commandPalette;
     QLineEdit* pathLineEdit;
@@ -1941,6 +2379,8 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "DebugWidget.hpp"
 #include "WelcomeWidget.hpp"
 #include "CommandPalette.hpp"
+#include "SearchWidget.hpp"
+#include "GitWidget.hpp"
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -1979,6 +2419,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       historyView(nullptr),
       buildProcess(nullptr),
       fileBrowser(nullptr),
+      searchWidget(nullptr),
+      gitWidget(nullptr),
       aiPatchController(nullptr),
       commandPalette(nullptr),
       pathLineEdit(nullptr),
@@ -2288,11 +2730,24 @@ bool EditorWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void EditorWindow::createDocks() {
-    // File Browser (Left)
-    auto* fileDock = new QDockWidget("Files", this);
-    fileBrowser = new FileBrowser(fileDock);
-    fileDock->setWidget(fileBrowser);
-    fileDock->setMinimumWidth(250);
+    // File Browser / Explorer Dock (Left)
+    auto* fileDock = new QDockWidget("Explorer", this);
+    fileDock->setMinimumWidth(280);
+    
+    auto* leftTabs = new QTabWidget(fileDock);
+    leftTabs->setStyleSheet("QTabWidget::pane { border: none; }"
+                            "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 8px 12px; font-family: 'Segoe UI', Arial; }"
+                            "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
+
+    fileBrowser = new FileBrowser(leftTabs);
+    searchWidget = new SearchWidget(leftTabs);
+    gitWidget = new GitWidget(leftTabs);
+
+    leftTabs->addTab(fileBrowser, "Files");
+    leftTabs->addTab(searchWidget, "Search");
+    leftTabs->addTab(gitWidget, "Git");
+
+    fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
 
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
@@ -2301,7 +2756,11 @@ void EditorWindow::createDocks() {
 
     connect(fileBrowser, &FileBrowser::rootChanged, this, [this](const QString& path) {
         if (pathLineEdit) pathLineEdit->setText(path);
+        if (searchWidget) searchWidget->setRootPath(path);
+        if (gitWidget) gitWidget->setRootPath(path);
     });
+
+    connect(searchWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);

@@ -6,6 +6,8 @@
 
 class CustomEditor;
 class FileBrowser;
+class SearchWidget;
+class GitWidget;
 class WelcomeWidget;
 class AIPatchController;
 class CommandPalette;
@@ -55,6 +57,8 @@ private:
 
     CustomEditor* editor;
     FileBrowser* fileBrowser;
+    SearchWidget* searchWidget;
+    GitWidget* gitWidget;
     AIPatchController* aiPatchController;
     CommandPalette* commandPalette;
     QLineEdit* pathLineEdit;
