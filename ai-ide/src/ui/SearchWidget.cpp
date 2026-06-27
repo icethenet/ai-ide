@@ -18,7 +18,8 @@ void SearchThread::run() {
         if (isInterruptionRequested()) break;
         QString path = it.next();
         
-        if (path.contains("/.git/") || path.contains("/build/") || path.contains("/.agents/") || path.contains("/.antigravity/")) {
+        QString cleanPath = QDir::cleanPath(path);
+        if (cleanPath.contains("/.git/") || cleanPath.contains("/build/") || cleanPath.contains("/.agents/") || cleanPath.contains("/.antigravity/")) {
             continue;
         }
         

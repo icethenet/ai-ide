@@ -211,8 +211,7 @@ FileBrowser::FileBrowser(QWidget* parent) : QWidget(parent) {
 }
 
 void FileBrowser::setRootDirectory(const QString& path) {
-    model->setRootPath(path);
-    tree->setRootIndex(model->index(path));
+    tree->setRootIndex(model->setRootPath(path));
     emit rootChanged(path);
 }
 """)
@@ -397,7 +396,8 @@ void SearchThread::run() {
         if (isInterruptionRequested()) break;
         QString path = it.next();
         
-        if (path.contains("/.git/") || path.contains("/build/") || path.contains("/.agents/") || path.contains("/.antigravity/")) {
+        QString cleanPath = QDir::cleanPath(path);
+        if (cleanPath.contains("/.git/") || cleanPath.contains("/build/") || cleanPath.contains("/.agents/") || cleanPath.contains("/.antigravity/")) {
             continue;
         }
         
@@ -579,6 +579,11 @@ GitWidget::GitWidget(QWidget* parent)
     connect(syncBtn, &QPushButton::clicked, this, &GitWidget::syncChanges);
     connect(commitBtn, &QPushButton::clicked, this, &GitWidget::commitChanges);
     connect(gitProcess, &QProcess::finished, this, &GitWidget::onProcessFinished);
+    connect(gitProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+        statusList->clear();
+        auto* item = new QListWidgetItem(statusList);
+        item->setText("Git process error (not found on PATH?)");
+    });
 }
 
 void GitWidget::setRootPath(const QString& path) {
@@ -2392,6 +2397,7 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include <QInputDialog>
 #include <QFile>
 #include <QFileDialog>
+#include <QDir>
 #include <QShowEvent>
 #include <QTimer>
 #include <QMessageBox>
@@ -2761,6 +2767,12 @@ void EditorWindow::createDocks() {
     });
 
     connect(searchWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
+
+    // Initialize initial paths on startup
+    QString initialPath = QDir::currentPath();
+    if (pathLineEdit) pathLineEdit->setText(initialPath);
+    if (searchWidget) searchWidget->setRootPath(initialPath);
+    if (gitWidget) gitWidget->setRootPath(initialPath);
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);

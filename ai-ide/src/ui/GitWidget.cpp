@@ -42,6 +42,11 @@ GitWidget::GitWidget(QWidget* parent)
     connect(syncBtn, &QPushButton::clicked, this, &GitWidget::syncChanges);
     connect(commitBtn, &QPushButton::clicked, this, &GitWidget::commitChanges);
     connect(gitProcess, &QProcess::finished, this, &GitWidget::onProcessFinished);
+    connect(gitProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+        statusList->clear();
+        auto* item = new QListWidgetItem(statusList);
+        item->setText("Git process error (not found on PATH?)");
+    });
 }
 
 void GitWidget::setRootPath(const QString& path) {

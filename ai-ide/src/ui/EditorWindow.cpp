@@ -24,6 +24,7 @@
 #include <QInputDialog>
 #include <QFile>
 #include <QFileDialog>
+#include <QDir>
 #include <QShowEvent>
 #include <QTimer>
 #include <QMessageBox>
@@ -393,6 +394,12 @@ void EditorWindow::createDocks() {
     });
 
     connect(searchWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
+
+    // Initialize initial paths on startup
+    QString initialPath = QDir::currentPath();
+    if (pathLineEdit) pathLineEdit->setText(initialPath);
+    if (searchWidget) searchWidget->setRootPath(initialPath);
+    if (gitWidget) gitWidget->setRootPath(initialPath);
 
     // AI Chat (Right)
     auto* aiDock = new QDockWidget("AI Chat", this);
