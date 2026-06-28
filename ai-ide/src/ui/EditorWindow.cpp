@@ -659,6 +659,9 @@ void EditorWindow::createMenus() {
     auto *buildMenu = menuBar()->addMenu("&Build");
     buildMenu->addAction("Build Project", QKeySequence(Qt::CTRL | Qt::Key_B), this, &EditorWindow::runBuild);
 
+    auto *searchAction = menuBar()->addAction("Search Workspace", this, &EditorWindow::openSearchTab);
+    searchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+
     auto *helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About", [this]() {
         QMessageBox msgBox(this);
