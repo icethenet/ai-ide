@@ -56,6 +56,7 @@ private slots:
     void updateProgress(int current, int total);
     void indexingFinished();
     void startIndexing();
+    void updateIndexStats();
 
 private:
     QString rootPath;

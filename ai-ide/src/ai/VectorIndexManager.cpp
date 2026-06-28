@@ -82,11 +82,39 @@ void VectorIndexManager::initDb() {
     }
 }
 
+IndexStats VectorIndexManager::getIndexStats() {
+    IndexStats stats{0, 0};
+    QSqlDatabase db = getDbForCurrentThread();
+    QSqlQuery query(db);
+    query.exec("SELECT COUNT(*), COUNT(DISTINCT file_path) FROM codebase_embeddings");
+    if (query.next()) {
+        stats.chunks = query.value(0).toInt();
+        stats.files = query.value(1).toInt();
+    }
+    return stats;
+}
+
+QString VectorIndexManager::getLastError() {
+    QMutexLocker locker(&mutex);
+    return lastError;
+}
+
+void VectorIndexManager::setLastError(const QString& err) {
+    QMutexLocker locker(&mutex);
+    lastError = err;
+}
+
+void VectorIndexManager::clearLastError() {
+    QMutexLocker locker(&mutex);
+    lastError.clear();
+}
+
 void VectorIndexManager::startIndexing(const QString& rootPath) {
     QMutexLocker locker(&mutex);
     if (m_indexing) return;
     m_indexing = true;
 
+    clearLastError();
     std::cout << "[VectorIndex] Indexing started in background for path: " << rootPath.toStdString() << std::endl;
 
     auto* worker = new IndexWorker(rootPath, this);
@@ -181,8 +209,9 @@ static QVector<float> queryEmbedding(const QString& text) {
             }
         }
     } else {
-        std::cerr << "[VectorIndex] Network error: " << reply->errorString().toStdString() << " (Code: " << reply->error() << ")" << std::endl;
-        std::cerr << "[VectorIndex] Error payload: " << reply->readAll().toStdString() << std::endl;
+        QString errStr = reply->errorString() + " - " + QString::fromUtf8(reply->readAll());
+        VectorIndexManager::instance().setLastError(errStr);
+        std::cerr << "[VectorIndex] Network error: " << errStr.toStdString() << std::endl;
     }
     reply->deleteLater();
     return vec;

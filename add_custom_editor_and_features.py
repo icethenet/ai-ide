@@ -369,6 +369,11 @@ struct SearchResult {
     float score;
 };
 
+struct IndexStats {
+    int chunks;
+    int files;
+};
+
 class VectorIndexManager : public QObject {
     Q_OBJECT
 public:
@@ -381,6 +386,11 @@ public:
     QVector<SearchResult> search(const QString& queryText, float threshold = 0.5f);
     
     QSqlDatabase getDbForCurrentThread();
+    
+    IndexStats getIndexStats();
+    QString getLastError();
+    void setLastError(const QString& err);
+    void clearLastError();
 
 signals:
     void indexingProgress(int current, int total);
@@ -393,6 +403,7 @@ private:
     void initDb();
     bool m_indexing = false;
     QMutex mutex;
+    QString lastError;
 };
 
 class IndexWorker : public QThread {
@@ -494,11 +505,39 @@ void VectorIndexManager::initDb() {
     }
 }
 
+IndexStats VectorIndexManager::getIndexStats() {
+    IndexStats stats{0, 0};
+    QSqlDatabase db = getDbForCurrentThread();
+    QSqlQuery query(db);
+    query.exec("SELECT COUNT(*), COUNT(DISTINCT file_path) FROM codebase_embeddings");
+    if (query.next()) {
+        stats.chunks = query.value(0).toInt();
+        stats.files = query.value(1).toInt();
+    }
+    return stats;
+}
+
+QString VectorIndexManager::getLastError() {
+    QMutexLocker locker(&mutex);
+    return lastError;
+}
+
+void VectorIndexManager::setLastError(const QString& err) {
+    QMutexLocker locker(&mutex);
+    lastError = err;
+}
+
+void VectorIndexManager::clearLastError() {
+    QMutexLocker locker(&mutex);
+    lastError.clear();
+}
+
 void VectorIndexManager::startIndexing(const QString& rootPath) {
     QMutexLocker locker(&mutex);
     if (m_indexing) return;
     m_indexing = true;
 
+    clearLastError();
     std::cout << "[VectorIndex] Indexing started in background for path: " << rootPath.toStdString() << std::endl;
 
     auto* worker = new IndexWorker(rootPath, this);
@@ -593,8 +632,9 @@ static QVector<float> queryEmbedding(const QString& text) {
             }
         }
     } else {
-        std::cerr << "[VectorIndex] Network error: " << reply->errorString().toStdString() << " (Code: " << reply->error() << ")" << std::endl;
-        std::cerr << "[VectorIndex] Error payload: " << reply->readAll().toStdString() << std::endl;
+        QString errStr = reply->errorString() + " - " + QString::fromUtf8(reply->readAll());
+        VectorIndexManager::instance().setLastError(errStr);
+        std::cerr << "[VectorIndex] Network error: " << errStr.toStdString() << std::endl;
     }
     reply->deleteLater();
     return vec;
@@ -2529,6 +2569,7 @@ private slots:
     void updateProgress(int current, int total);
     void indexingFinished();
     void startIndexing();
+    void updateIndexStats();
 
 private:
     QString rootPath;
@@ -2640,13 +2681,12 @@ SearchWidget::SearchWidget(QWidget* parent)
 
     connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingProgress, this, &SearchWidget::updateProgress);
     connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingFinished, this, &SearchWidget::indexingFinished);
+    updateIndexStats();
 }
 
 void SearchWidget::setRootPath(const QString& path) {
     rootPath = path;
-    if (!rootPath.isEmpty()) {
-        VectorIndexManager::instance().startIndexing(rootPath);
-    }
+    updateIndexStats();
 }
 
 void SearchWidget::startIndexing() {
@@ -2657,12 +2697,30 @@ void SearchWidget::startIndexing() {
 }
 
 void SearchWidget::updateProgress(int current, int total) {
-    progressLabel->setText(QString("Indexing codebase: %1 of %2 files...").arg(current).arg(total));
+    QString lastErr = VectorIndexManager::instance().getLastError();
+    if (!lastErr.isEmpty()) {
+        progressLabel->setText(QString("Indexing codebase: %1 of %2 files... (Error: %3)")
+                               .arg(current).arg(total).arg(lastErr.left(120)));
+    } else {
+        progressLabel->setText(QString("Indexing codebase: %1 of %2 files...").arg(current).arg(total));
+    }
 }
 
 void SearchWidget::indexingFinished() {
     indexBtn->setEnabled(true);
-    progressLabel->setText("Semantic index ready!");
+    QString lastErr = VectorIndexManager::instance().getLastError();
+    if (!lastErr.isEmpty()) {
+        progressLabel->setText(QString("Indexing finished with errors. Last Error: %1").arg(lastErr.left(120)));
+    } else {
+        updateIndexStats();
+    }
+}
+
+void SearchWidget::updateIndexStats() {
+    auto stats = VectorIndexManager::instance().getIndexStats();
+    progressLabel->setText(QString("Local Index: %1 chunks across %2 files indexed.")
+                           .arg(stats.chunks)
+                           .arg(stats.files));
 }
 
 void SearchWidget::startSearch() {

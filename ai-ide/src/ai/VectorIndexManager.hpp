@@ -13,6 +13,11 @@ struct SearchResult {
     float score;
 };
 
+struct IndexStats {
+    int chunks;
+    int files;
+};
+
 class VectorIndexManager : public QObject {
     Q_OBJECT
 public:
@@ -25,6 +30,11 @@ public:
     QVector<SearchResult> search(const QString& queryText, float threshold = 0.5f);
     
     QSqlDatabase getDbForCurrentThread();
+    
+    IndexStats getIndexStats();
+    QString getLastError();
+    void setLastError(const QString& err);
+    void clearLastError();
 
 signals:
     void indexingProgress(int current, int total);
@@ -37,6 +47,7 @@ private:
     void initDb();
     bool m_indexing = false;
     QMutex mutex;
+    QString lastError;
 };
 
 class IndexWorker : public QThread {

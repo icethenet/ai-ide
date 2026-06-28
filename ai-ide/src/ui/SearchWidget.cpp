@@ -94,13 +94,12 @@ SearchWidget::SearchWidget(QWidget* parent)
 
     connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingProgress, this, &SearchWidget::updateProgress);
     connect(&VectorIndexManager::instance(), &VectorIndexManager::indexingFinished, this, &SearchWidget::indexingFinished);
+    updateIndexStats();
 }
 
 void SearchWidget::setRootPath(const QString& path) {
     rootPath = path;
-    if (!rootPath.isEmpty()) {
-        VectorIndexManager::instance().startIndexing(rootPath);
-    }
+    updateIndexStats();
 }
 
 void SearchWidget::startIndexing() {
@@ -111,12 +110,30 @@ void SearchWidget::startIndexing() {
 }
 
 void SearchWidget::updateProgress(int current, int total) {
-    progressLabel->setText(QString("Indexing codebase: %1 of %2 files...").arg(current).arg(total));
+    QString lastErr = VectorIndexManager::instance().getLastError();
+    if (!lastErr.isEmpty()) {
+        progressLabel->setText(QString("Indexing codebase: %1 of %2 files... (Error: %3)")
+                               .arg(current).arg(total).arg(lastErr.left(120)));
+    } else {
+        progressLabel->setText(QString("Indexing codebase: %1 of %2 files...").arg(current).arg(total));
+    }
 }
 
 void SearchWidget::indexingFinished() {
     indexBtn->setEnabled(true);
-    progressLabel->setText("Semantic index ready!");
+    QString lastErr = VectorIndexManager::instance().getLastError();
+    if (!lastErr.isEmpty()) {
+        progressLabel->setText(QString("Indexing finished with errors. Last Error: %1").arg(lastErr.left(120)));
+    } else {
+        updateIndexStats();
+    }
+}
+
+void SearchWidget::updateIndexStats() {
+    auto stats = VectorIndexManager::instance().getIndexStats();
+    progressLabel->setText(QString("Local Index: %1 chunks across %2 files indexed.")
+                           .arg(stats.chunks)
+                           .arg(stats.files));
 }
 
 void SearchWidget::startSearch() {
