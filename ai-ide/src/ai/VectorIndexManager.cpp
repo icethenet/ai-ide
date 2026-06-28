@@ -50,6 +50,11 @@ QSqlDatabase VectorIndexManager::getDbForCurrentThread() {
     if (!threadDb.isOpen()) {
         if (!threadDb.open()) {
             std::cerr << "[VectorIndex] Failed to open database: " << threadDb.lastError().text().toStdString() << std::endl;
+        } else {
+            // Enable WAL mode and set busy timeout for multi-threading safety
+            QSqlQuery q(threadDb);
+            q.exec("PRAGMA journal_mode = WAL;");
+            q.exec("PRAGMA busy_timeout = 5000;");
         }
     }
     return threadDb;
@@ -82,12 +87,15 @@ void VectorIndexManager::startIndexing(const QString& rootPath) {
     if (m_indexing) return;
     m_indexing = true;
 
+    std::cout << "[VectorIndex] Indexing started in background for path: " << rootPath.toStdString() << std::endl;
+
     auto* worker = new IndexWorker(rootPath, this);
     connect(worker, &IndexWorker::progress, this, &VectorIndexManager::indexingProgress);
     connect(worker, &IndexWorker::finished, this, [this, worker]() {
         QMutexLocker l(&mutex);
         m_indexing = false;
         worker->deleteLater();
+        std::cout << "[VectorIndex] Indexing completed successfully." << std::endl;
         emit indexingFinished();
     });
     worker->start();
