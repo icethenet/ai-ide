@@ -391,6 +391,7 @@ public:
     QString getLastError();
     void setLastError(const QString& err);
     void clearLastError();
+    void initDb();
 
 signals:
     void indexingProgress(int current, int total);
@@ -400,7 +401,6 @@ private:
     VectorIndexManager();
     ~VectorIndexManager();
 
-    void initDb();
     bool m_indexing = false;
     QMutex mutex;
     QString lastError;
@@ -448,7 +448,6 @@ VectorIndexManager& VectorIndexManager::instance() {
 }
 
 VectorIndexManager::VectorIndexManager() {
-    initDb();
 }
 
 VectorIndexManager::~VectorIndexManager() {
@@ -474,9 +473,8 @@ QSqlDatabase VectorIndexManager::getDbForCurrentThread() {
         if (!threadDb.open()) {
             std::cerr << "[VectorIndex] Failed to open database: " << threadDb.lastError().text().toStdString() << std::endl;
         } else {
-            // Enable WAL mode and set busy timeout for multi-threading safety
+            // Set busy timeout for multi-threading safety before any other queries
             QSqlQuery q(threadDb);
-            q.exec("PRAGMA journal_mode = WAL;");
             q.exec("PRAGMA busy_timeout = 5000;");
         }
     }
@@ -506,6 +504,7 @@ void VectorIndexManager::initDb() {
 }
 
 IndexStats VectorIndexManager::getIndexStats() {
+    initDb();
     IndexStats stats{0, 0};
     QSqlDatabase db = getDbForCurrentThread();
     QSqlQuery query(db);
@@ -641,6 +640,7 @@ static QVector<float> queryEmbedding(const QString& text) {
 }
 
 QVector<SearchResult> VectorIndexManager::search(const QString& queryText, float threshold) {
+    initDb();
     QVector<SearchResult> results;
     
     QVector<float> qVec = queryEmbedding(queryText);
@@ -686,6 +686,7 @@ IndexWorker::IndexWorker(const QString& rootPath, QObject* parent)
 void IndexWorker::run() {
     if (root.isEmpty()) return;
 
+    VectorIndexManager::instance().initDb();
     QSqlDatabase threadDb = VectorIndexManager::instance().getDbForCurrentThread();
 
     QStringList files;
@@ -5190,6 +5191,7 @@ private:
 """)
 
 write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
+#include <iostream>
 #include "FileBrowser.hpp"
 #include "AIChatPanel.hpp"
 #include "CustomEditor.hpp"
@@ -5667,6 +5669,7 @@ bool EditorWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void EditorWindow::createDocks() {
+    std::cout << "[Diagnostics] createDocks: starting..." << std::endl;
     // File Browser / Explorer Dock (Left)
     auto* fileDock = new QDockWidget("Explorer", this);
     fileDock->setMinimumWidth(280);
@@ -5676,6 +5679,7 @@ void EditorWindow::createDocks() {
                             "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 8px 12px; font-family: 'Segoe UI', Arial; }"
                             "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
 
+    std::cout << "[Diagnostics] createDocks: instantiating FileBrowser and GitWidget..." << std::endl;
     fileBrowser = new FileBrowser(leftTabs);
     gitWidget = new GitWidget(leftTabs);
 
@@ -5685,6 +5689,7 @@ void EditorWindow::createDocks() {
     fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
  
+    std::cout << "[Diagnostics] createDocks: connecting signals..." << std::endl;
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
         openFileInTab(path);
     });
@@ -5701,15 +5706,22 @@ void EditorWindow::createDocks() {
         }
     });
  
-    // Initialize initial paths on startup
+    std::cout << "[Diagnostics] createDocks: initializing initialPath..." << std::endl;
     QString initialPath = QDir::currentPath();
+    std::cout << "[Diagnostics] createDocks: initialPath is " << initialPath.toStdString() << std::endl;
     if (pathLineEdit) pathLineEdit->setText(initialPath);
+    
+    std::cout << "[Diagnostics] createDocks: setting gitWidget root path..." << std::endl;
     if (gitWidget) gitWidget->setRootPath(initialPath);
+    
+    std::cout << "[Diagnostics] createDocks: starting background vector indexing..." << std::endl;
     if (!initialPath.isEmpty()) {
         VectorIndexManager::instance().startIndexing(initialPath);
     }
 
+    std::cout << "[Diagnostics] createDocks: starting LSP server..." << std::endl;
     LspClient::instance().startServer(initialPath);
+    std::cout << "[Diagnostics] createDocks: setup complete!" << std::endl;
 
     connect(&LspClient::instance(), &LspClient::definitionReady, this, [this](int id, const QString& path, int line) {
         if (!path.isEmpty()) {

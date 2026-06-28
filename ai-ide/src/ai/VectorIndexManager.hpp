@@ -35,6 +35,7 @@ public:
     QString getLastError();
     void setLastError(const QString& err);
     void clearLastError();
+    void initDb();
 
 signals:
     void indexingProgress(int current, int total);
@@ -44,7 +45,6 @@ private:
     VectorIndexManager();
     ~VectorIndexManager();
 
-    void initDb();
     bool m_indexing = false;
     QMutex mutex;
     QString lastError;

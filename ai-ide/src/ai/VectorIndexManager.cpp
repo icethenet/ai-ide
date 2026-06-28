@@ -25,7 +25,6 @@ VectorIndexManager& VectorIndexManager::instance() {
 }
 
 VectorIndexManager::VectorIndexManager() {
-    initDb();
 }
 
 VectorIndexManager::~VectorIndexManager() {
@@ -51,9 +50,8 @@ QSqlDatabase VectorIndexManager::getDbForCurrentThread() {
         if (!threadDb.open()) {
             std::cerr << "[VectorIndex] Failed to open database: " << threadDb.lastError().text().toStdString() << std::endl;
         } else {
-            // Enable WAL mode and set busy timeout for multi-threading safety
+            // Set busy timeout for multi-threading safety before any other queries
             QSqlQuery q(threadDb);
-            q.exec("PRAGMA journal_mode = WAL;");
             q.exec("PRAGMA busy_timeout = 5000;");
         }
     }
@@ -83,6 +81,7 @@ void VectorIndexManager::initDb() {
 }
 
 IndexStats VectorIndexManager::getIndexStats() {
+    initDb();
     IndexStats stats{0, 0};
     QSqlDatabase db = getDbForCurrentThread();
     QSqlQuery query(db);
@@ -218,6 +217,7 @@ static QVector<float> queryEmbedding(const QString& text) {
 }
 
 QVector<SearchResult> VectorIndexManager::search(const QString& queryText, float threshold) {
+    initDb();
     QVector<SearchResult> results;
     
     QVector<float> qVec = queryEmbedding(queryText);
@@ -263,6 +263,7 @@ IndexWorker::IndexWorker(const QString& rootPath, QObject* parent)
 void IndexWorker::run() {
     if (root.isEmpty()) return;
 
+    VectorIndexManager::instance().initDb();
     QSqlDatabase threadDb = VectorIndexManager::instance().getDbForCurrentThread();
 
     QStringList files;
