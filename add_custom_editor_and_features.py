@@ -5077,6 +5077,7 @@ private:
     void parseBuildLine(const QString& line);
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
+    void openSearchTab();
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
@@ -5328,6 +5329,8 @@ void EditorWindow::createCentralEditor() {
             auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(index));
             if (ed) {
                 pathLineEdit->setText(ed->currentFilePath());
+            } else if (qobject_cast<SearchWidget*>(tabWidget->widget(index))) {
+                pathLineEdit->setText("Workspace Search");
             } else {
                 pathLineEdit->setText("Welcome Page");
             }
@@ -5486,6 +5489,29 @@ void EditorWindow::openWelcomeTab() {
     tabWidget->setCurrentIndex(idx);
 }
 
+void EditorWindow::openSearchTab() {
+    int searchIdx = -1;
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (qobject_cast<SearchWidget*>(tabWidget->widget(i))) {
+            searchIdx = i;
+            break;
+        }
+    }
+    
+    if (searchIdx != -1) {
+        tabWidget->setCurrentIndex(searchIdx);
+    } else {
+        auto* sWidget = new SearchWidget(this);
+        if (fileBrowser) {
+            sWidget->setRootPath(fileBrowser->rootPath());
+        }
+        connect(sWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
+        
+        int idx = tabWidget->addTab(sWidget, "Workspace Search");
+        tabWidget->setCurrentIndex(idx);
+    }
+}
+
 void EditorWindow::showCommandPalette() {
     if (!commandPalette) {
         commandPalette = new CommandPalette(this);
@@ -5494,6 +5520,7 @@ void EditorWindow::showCommandPalette() {
             QString path = QFileDialog::getOpenFileName(this, "Open File");
             if (!path.isEmpty()) openFileInTab(path);
         });
+        commandPalette->addCommand("File: Search in Workspace", "Ctrl+Shift+F", [this]() { openSearchTab(); });
         commandPalette->addCommand("File: Open Folder", "", [this]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder");
             if (!dir.isEmpty() && fileBrowser) {
@@ -5584,11 +5611,33 @@ void EditorWindow::createDocks() {
                             "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
 
     fileBrowser = new FileBrowser(leftTabs);
-    searchWidget = new SearchWidget(leftTabs);
     gitWidget = new GitWidget(leftTabs);
 
+    auto* sidebarSearchWidget = new QWidget(leftTabs);
+    auto* sidebarSearchLayout = new QVBoxLayout(sidebarSearchWidget);
+    sidebarSearchLayout->setAlignment(Qt::AlignCenter);
+    sidebarSearchLayout->setContentsMargins(15, 15, 15, 15);
+    
+    auto* searchIconLabel = new QLabel("🔍", sidebarSearchWidget);
+    searchIconLabel->setStyleSheet("QLabel { font-size: 48px; color: #5c6370; }");
+    searchIconLabel->setAlignment(Qt::AlignCenter);
+    sidebarSearchLayout->addWidget(searchIconLabel);
+    
+    auto* descLabel = new QLabel("Search for text or semantic concepts across all project files.", sidebarSearchWidget);
+    descLabel->setWordWrap(true);
+    descLabel->setAlignment(Qt::AlignCenter);
+    descLabel->setStyleSheet("QLabel { color: #8a92a3; font-size: 11px; margin: 15px 0px; font-family: 'Segoe UI', Arial; }");
+    sidebarSearchLayout->addWidget(descLabel);
+
+    auto* openSearchBtn = new QPushButton("Search Workspace", sidebarSearchWidget);
+    openSearchBtn->setStyleSheet("QPushButton { background-color: #3e4452; color: #abb2bf; border: 1px solid #4b5263; border-radius: 4px; padding: 6px 12px; font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: bold; }"
+                                 "QPushButton:hover { background-color: #4b5263; color: #ffffff; }");
+    sidebarSearchLayout->addWidget(openSearchBtn);
+    
+    connect(openSearchBtn, &QPushButton::clicked, this, &EditorWindow::openSearchTab);
+
     leftTabs->addTab(fileBrowser, "Files");
-    leftTabs->addTab(searchWidget, "Search");
+    leftTabs->addTab(sidebarSearchWidget, "Search");
     leftTabs->addTab(gitWidget, "Git");
 
     fileDock->setWidget(leftTabs);
@@ -5600,11 +5649,12 @@ void EditorWindow::createDocks() {
 
     connect(fileBrowser, &FileBrowser::rootChanged, this, [this](const QString& path) {
         if (pathLineEdit) pathLineEdit->setText(path);
-        if (searchWidget) searchWidget->setRootPath(path);
         if (gitWidget) gitWidget->setRootPath(path);
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            auto* sWidget = qobject_cast<SearchWidget*>(tabWidget->widget(i));
+            if (sWidget) sWidget->setRootPath(path);
+        }
     });
-
-    connect(searchWidget, &SearchWidget::matchActivated, this, &EditorWindow::gotoLine);
 
     // Initialize initial paths on startup
     QString initialPath = QDir::currentPath();

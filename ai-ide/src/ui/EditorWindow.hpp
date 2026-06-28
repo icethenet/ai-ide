@@ -44,6 +44,7 @@ private:
     void parseBuildLine(const QString& line);
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
+    void openSearchTab();
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
