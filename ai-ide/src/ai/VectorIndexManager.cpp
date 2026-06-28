@@ -113,7 +113,7 @@ void VectorIndexManager::startIndexing(const QString& rootPath) {
     if (m_indexing) return;
     m_indexing = true;
 
-    clearLastError();
+    lastError.clear();
     std::cout << "[VectorIndex] Indexing started in background for path: " << rootPath.toStdString() << std::endl;
 
     auto* worker = new IndexWorker(rootPath, this);

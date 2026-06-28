@@ -477,7 +477,6 @@ bool EditorWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void EditorWindow::createDocks() {
-    std::cout << "[Diagnostics] createDocks: starting..." << std::endl;
     // File Browser / Explorer Dock (Left)
     auto* fileDock = new QDockWidget("Explorer", this);
     fileDock->setMinimumWidth(280);
@@ -487,7 +486,6 @@ void EditorWindow::createDocks() {
                             "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 8px 12px; font-family: 'Segoe UI', Arial; }"
                             "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
 
-    std::cout << "[Diagnostics] createDocks: instantiating FileBrowser and GitWidget..." << std::endl;
     fileBrowser = new FileBrowser(leftTabs);
     gitWidget = new GitWidget(leftTabs);
 
@@ -497,7 +495,6 @@ void EditorWindow::createDocks() {
     fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
  
-    std::cout << "[Diagnostics] createDocks: connecting signals..." << std::endl;
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
         openFileInTab(path);
     });
@@ -514,22 +511,15 @@ void EditorWindow::createDocks() {
         }
     });
  
-    std::cout << "[Diagnostics] createDocks: initializing initialPath..." << std::endl;
+    // Initialize initial paths on startup
     QString initialPath = QDir::currentPath();
-    std::cout << "[Diagnostics] createDocks: initialPath is " << initialPath.toStdString() << std::endl;
     if (pathLineEdit) pathLineEdit->setText(initialPath);
-    
-    std::cout << "[Diagnostics] createDocks: setting gitWidget root path..." << std::endl;
     if (gitWidget) gitWidget->setRootPath(initialPath);
-    
-    std::cout << "[Diagnostics] createDocks: starting background vector indexing..." << std::endl;
     if (!initialPath.isEmpty()) {
         VectorIndexManager::instance().startIndexing(initialPath);
     }
 
-    std::cout << "[Diagnostics] createDocks: starting LSP server..." << std::endl;
     LspClient::instance().startServer(initialPath);
-    std::cout << "[Diagnostics] createDocks: setup complete!" << std::endl;
 
     connect(&LspClient::instance(), &LspClient::definitionReady, this, [this](int id, const QString& path, int line) {
         if (!path.isEmpty()) {
