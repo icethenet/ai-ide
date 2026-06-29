@@ -20,12 +20,15 @@ public:
 
 signals:
     void fileChanged(const QString& path);
+    void fileSaved(const QString& path);
     void closeRequested();
 
 private:
     CodeEditor* editor;
-    QPushButton* closeButton;
+    QPushButton* saveButton;
     QPushButton* saveAsButton;
+    QPushButton* closeButton;
+    QPushButton* openHtmlButton;
     QString filePath;
     CppHighlighter* highlighter;
 };

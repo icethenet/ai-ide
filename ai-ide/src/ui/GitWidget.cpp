@@ -1,20 +1,33 @@
 #include "GitWidget.hpp"
+#include "GitHistoryWidget.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QMessageBox>
+#include <QTabWidget>
+#include <QDir>
 
 GitWidget::GitWidget(QWidget* parent)
     : QWidget(parent), gitProcess(new QProcess(this))
 {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(5, 5, 5, 5);
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* tabs = new QTabWidget(this);
+    tabs->setStyleSheet("QTabWidget::pane { border: none; }"
+                        "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 6px 10px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                        "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
+
+    // Tab 1: Staging and Commit Changes
+    auto* changesTab = new QWidget(this);
+    auto* layout = new QVBoxLayout(changesTab);
+    layout->setContentsMargins(4, 4, 4, 4);
 
     auto* toolbar = new QHBoxLayout();
     auto* refreshBtn = new QPushButton("🔄 Refresh", this);
     auto* syncBtn = new QPushButton("🚀 Sync", this);
     
-    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }"
+    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                        "QPushButton:hover { background-color: #3e4452; color: #ffffff; }";
     refreshBtn->setStyleSheet(btnStyle);
     syncBtn->setStyleSheet(btnStyle);
@@ -24,24 +37,41 @@ GitWidget::GitWidget(QWidget* parent)
     layout->addLayout(toolbar);
 
     statusList = new QListWidget(this);
-    statusList->setStyleSheet("QListWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; }"
+    statusList->setStyleSheet("QListWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                               "QListWidget::item { padding: 4px; }");
     layout->addWidget(statusList);
 
     commitMessageEdit = new QLineEdit(this);
     commitMessageEdit->setPlaceholderText("Commit message...");
-    commitMessageEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }");
+    commitMessageEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }");
     layout->addWidget(commitMessageEdit);
 
     auto* commitBtn = new QPushButton("Commit Staged Changes", this);
-    commitBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 8px; font-weight: bold; font-family: 'Segoe UI', Arial; }"
+    commitBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 8px; font-weight: bold; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                              "QPushButton:hover { background-color: #528bff; }");
     layout->addWidget(commitBtn);
+
+    tabs->addTab(changesTab, "Changes");
+
+    // Tab 2: Commit History
+    historyWidget = new GitHistoryWidget(this);
+    tabs->addTab(historyWidget, "History");
+
+    mainLayout->addWidget(tabs);
 
     connect(refreshBtn, &QPushButton::clicked, this, &GitWidget::refreshStatus);
     connect(syncBtn, &QPushButton::clicked, this, &GitWidget::syncChanges);
     connect(commitBtn, &QPushButton::clicked, this, &GitWidget::commitChanges);
     connect(gitProcess, &QProcess::finished, this, &GitWidget::onProcessFinished);
+    
+    connect(statusList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item->text().startsWith("[Conflict]")) {
+            QString relPath = item->text().mid(10).trimmed();
+            QString absPath = QDir(rootPath).absoluteFilePath(relPath);
+            emit conflictResolutionRequested(absPath);
+        }
+    });
+
     connect(gitProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
         statusList->clear();
         auto* item = new QListWidgetItem(statusList);
@@ -51,6 +81,7 @@ GitWidget::GitWidget(QWidget* parent)
 
 void GitWidget::setRootPath(const QString& path) {
     rootPath = path;
+    if (historyWidget) historyWidget->setRootPath(path);
     refreshStatus();
 }
 
@@ -61,6 +92,7 @@ void GitWidget::refreshStatus() {
     currentMode = "status";
     gitProcess->setWorkingDirectory(rootPath);
     gitProcess->start("git", QStringList() << "status" << "--porcelain");
+    if (historyWidget) historyWidget->refreshHistory();
 }
 
 void GitWidget::commitChanges() {
@@ -108,9 +140,18 @@ void GitWidget::onProcessFinished(int exitCode) {
             QStringList lines = out.split("\n", Qt::SkipEmptyParts);
             for (const QString& line : lines) {
                 auto* item = new QListWidgetItem(statusList);
-                item->setText(line);
                 item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
                 item->setCheckState(Qt::Checked);
+
+                QString status = line.left(2);
+                QString path = line.mid(3).trimmed();
+
+                if (status == "UU" || status == "UD" || status == "DU" || status == "AA" || status == "AU") {
+                    item->setText("[Conflict] " + path);
+                    item->setForeground(QBrush(QColor("#e06c75")));
+                } else {
+                    item->setText(line);
+                }
             }
         } else {
             auto* item = new QListWidgetItem(statusList);

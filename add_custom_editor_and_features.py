@@ -1476,7 +1476,6 @@ void FileBrowser::deleteItem() {
     } else {
         success = QFile::remove(path);
     }
-
     if (success) {
         refreshView();
     } else {
@@ -1485,31 +1484,105 @@ void FileBrowser::deleteItem() {
 }
 """)
 
+write(f"{ROOT}/src/ai/AIAction.hpp", r"""#pragma once
+#include <QString>
+
+struct AIAction {
+    QString type;        // "create_file" | "modify_file" | "modify_current_editor" | "insert_at_cursor"
+    QString path;        // target file path (relative)
+    QString description; // action description
+    QString content;     // code content
+};
+""")
+
 write(f"{ROOT}/src/ui/AIChatPanel.hpp", r"""#pragma once
 #include <QWidget>
 #include <QTextEdit>
 #include <QPushButton>
+#include <QCheckBox>
+#include <QLabel>
+#include <QScrollArea>
+#include <QVBoxLayout>
+#include <QVector>
 #include <memory>
 #include "SettingsManager.hpp"
 #include "../ai/AIProvider.hpp"
+#include "../ai/AIAction.hpp"
+
+class ActionItemWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit ActionItemWidget(const AIAction& action, QWidget* parent = nullptr);
+    bool isChecked() const { return checkBox->isChecked(); }
+    AIAction getAction() const { return action; }
+
+signals:
+    void previewRequested(const AIAction& action);
+
+private:
+    QCheckBox* checkBox;
+    QLabel* typeBadge;
+    QLabel* infoLabel;
+    QPushButton* previewBtn;
+    AIAction action;
+};
+
+class ProposedActionsWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit ProposedActionsWidget(QWidget* parent = nullptr);
+    void setActions(const QVector<AIAction>& actions);
+    QVector<AIAction> getCheckedActions() const;
+    void clearActions();
+
+signals:
+    void executeRequested();
+    void previewAction(const AIAction& action);
+
+private:
+    QLabel* titleLabel;
+    QWidget* listContainer;
+    QVBoxLayout* listLayout;
+    QScrollArea* scrollArea;
+    QPushButton* applyBtn;
+    QPushButton* discardBtn;
+    QVector<ActionItemWidget*> items;
+};
 
 class AIChatPanel : public QWidget {
     Q_OBJECT
 public:
     explicit AIChatPanel(QWidget* parent = nullptr);
+    static QString applySearchReplace(const QString& originalText, const QString& patchContent, bool& success, QString& errorMsg);
+
 signals:
-    void applyToEditor(const QString& code);
-    void createNewFile(const QString& code);
+    void executeAction(const AIAction& action);
+    void requestActiveFileContext(QString& filePath, QString& fileContent, QString& baseDir);
     void promptArchived(const QString& summary);
+    void requestBuildRun();
+
+public slots:
+    void handleBuildFinished(int exitCode, const QString& buildErrors);
 
 private slots:
     void sendPrompt();
+    void handlePreview(const AIAction& action);
+    void executeActions();
+
 private:
+    void queryAI(const QString& prompt, bool isAutoFix = false);
+    void stopAgenticLoop();
+
     QTextEdit* chatHistory;
     QTextEdit* inputBox;
     QPushButton* sendButton;
+    ProposedActionsWidget* actionsPanel;
+    QCheckBox* agenticModeCheck;
     std::unique_ptr<AIProvider> provider;
-    QString lastExtractedCode;
+
+    bool isAgenticRunning;
+    int agenticIteration;
+    const int maxAgenticIterations = 5;
 };
 """)
 
@@ -1518,6 +1591,9 @@ write(f"{ROOT}/src/ui/AIChatPanel.cpp", r"""#include "AIChatPanel.hpp"
 #include "../ai/OllamaProvider.hpp"
 #include "../ai/ClaudeProvider.hpp"
 #include "../ai/AntigravityProvider.hpp"
+#include "DiffView.hpp"
+#include <QApplication>
+#include <QCheckBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QRegularExpression>
@@ -1526,60 +1602,343 @@ write(f"{ROOT}/src/ui/AIChatPanel.cpp", r"""#include "AIChatPanel.hpp"
 #include <QDir>
 #include <QMessageBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 
-AIChatPanel::AIChatPanel(QWidget* parent) : QWidget(parent) {
+QString AIChatPanel::applySearchReplace(const QString& originalText, const QString& patchContent, bool& success, QString& errorMsg) {
+    QString modifiedText = originalText;
+    success = true;
+
+    QRegularExpression hunkRegex("(?s)<<<<<<< SEARCH\\s*\\n(.*?)\\n?=======\\s*\\n(.*?)\\n?>>>>>>> REPLACE");
+    QRegularExpressionMatchIterator it = hunkRegex.globalMatch(patchContent);
+    
+    int matchCount = 0;
+    while (it.hasNext()) {
+        QRegularExpressionMatch match = it.next();
+        QString searchText = match.captured(1);
+        QString replaceText = match.captured(2);
+        matchCount++;
+
+        QString cleanSearch = searchText.trimmed();
+        
+        int index = modifiedText.indexOf(searchText);
+        if (index == -1) {
+            index = modifiedText.indexOf(cleanSearch);
+            if (index == -1) {
+                success = false;
+                errorMsg = QString("Could not find SEARCH block #%1 in the target file. SEARCH text was:\n%2").arg(matchCount).arg(cleanSearch.left(120));
+                return originalText;
+            }
+            modifiedText.replace(index, cleanSearch.length(), replaceText);
+        } else {
+            modifiedText.replace(index, searchText.length(), replaceText);
+        }
+    }
+
+    if (matchCount == 0) {
+        modifiedText = patchContent;
+    }
+
+    return modifiedText;
+}
+
+ActionItemWidget::ActionItemWidget(const AIAction& act, QWidget* parent)
+    : QWidget(parent), action(act)
+{
+    auto* layout = new QHBoxLayout(this);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(6);
+
+    checkBox = new QCheckBox(this);
+    checkBox->setChecked(true);
+
+    typeBadge = new QLabel(this);
+    typeBadge->setContentsMargins(4, 2, 4, 2);
+    
+    if (action.type == "create_file") {
+        typeBadge->setText(" CREATE ");
+        typeBadge->setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold; border-radius: 3px; font-size: 9px;");
+    } else if (action.type == "modify_file") {
+        typeBadge->setText(" MODIFY ");
+        typeBadge->setStyleSheet("background-color: #3498db; color: white; font-weight: bold; border-radius: 3px; font-size: 9px;");
+    } else if (action.type == "modify_current_editor") {
+        typeBadge->setText(" EDIT ACT ");
+        typeBadge->setStyleSheet("background-color: #9b59b6; color: white; font-weight: bold; border-radius: 3px; font-size: 9px;");
+    } else if (action.type == "insert_at_cursor") {
+        typeBadge->setText(" INSERT ");
+        typeBadge->setStyleSheet("background-color: #e67e22; color: white; font-weight: bold; border-radius: 3px; font-size: 9px;");
+    }
+
+    QString text = action.path.isEmpty() ? action.description : QString("%1 (%2)").arg(action.path).arg(action.description);
+    infoLabel = new QLabel(text, this);
+    infoLabel->setStyleSheet("font-size: 11px; font-weight: 500; color: #2c3e50;");
+    
+    previewBtn = new QPushButton("Diff", this);
+    previewBtn->setFixedWidth(40);
+    previewBtn->setStyleSheet("QPushButton { background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px; font-size: 10px; padding: 2px; color: #475569; font-weight: bold; }"
+                             "QPushButton:hover { background-color: #e2e8f0; }");
+
+    layout->addWidget(checkBox);
+    layout->addWidget(typeBadge);
+    layout->addWidget(infoLabel, 1);
+    layout->addWidget(previewBtn);
+
+    connect(previewBtn, &QPushButton::clicked, this, [this]() {
+        emit previewRequested(action);
+    });
+}
+
+ProposedActionsWidget::ProposedActionsWidget(QWidget* parent)
+    : QWidget(parent)
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(6);
+
+    titleLabel = new QLabel("Proposed Actions:", this);
+    titleLabel->setStyleSheet("font-weight: bold; color: #1e293b; font-size: 11px;");
+
+    scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setMaximumHeight(160);
+
+    listContainer = new QWidget(scrollArea);
+    listLayout = new QVBoxLayout(listContainer);
+    listLayout->setContentsMargins(0, 0, 0, 0);
+    listLayout->setSpacing(4);
+    listLayout->addStretch();
+    listContainer->setLayout(listLayout);
+
+    scrollArea->setWidget(listContainer);
+
+    auto* btnLayout = new QHBoxLayout();
+    applyBtn = new QPushButton("Apply Checked Actions", this);
+    applyBtn->setStyleSheet("QPushButton { background-color: #10b981; color: white; font-weight: bold; border-radius: 4px; padding: 5px; font-size: 11px; }"
+                            "QPushButton:hover { background-color: #059669; }");
+
+    discardBtn = new QPushButton("Discard", this);
+    discardBtn->setStyleSheet("QPushButton { background-color: #ef4444; color: white; font-weight: bold; border-radius: 4px; padding: 5px; font-size: 11px; }"
+                             "QPushButton:hover { background-color: #dc2626; }");
+
+    btnLayout->addWidget(applyBtn);
+    btnLayout->addWidget(discardBtn);
+
+    layout->addWidget(titleLabel);
+    layout->addWidget(scrollArea);
+    layout->addLayout(btnLayout);
+
+    setStyleSheet("QWidget { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }");
+
+    connect(applyBtn, &QPushButton::clicked, this, &ProposedActionsWidget::executeRequested);
+    connect(discardBtn, &QPushButton::clicked, this, &ProposedActionsWidget::clearActions);
+}
+
+void ProposedActionsWidget::setActions(const QVector<AIAction>& actions) {
+    clearActions();
+    
+    if (listLayout->count() > 0) {
+        QLayoutItem* item = listLayout->takeAt(0);
+        if (item) delete item;
+    }
+
+    for (const auto& action : actions) {
+        auto* itemWidget = new ActionItemWidget(action, listContainer);
+        listLayout->addWidget(itemWidget);
+        items.append(itemWidget);
+
+        connect(itemWidget, &ActionItemWidget::previewRequested, this, &ProposedActionsWidget::previewAction);
+    }
+    
+    listLayout->addStretch();
+    titleLabel->setText(QString("Proposed Actions (%1):").arg(actions.size()));
+    show();
+}
+
+QVector<AIAction> ProposedActionsWidget::getCheckedActions() const {
+    QVector<AIAction> checked;
+    for (auto* item : items) {
+        if (item->isChecked()) {
+            checked.append(item->getAction());
+        }
+    }
+    return checked;
+}
+
+void ProposedActionsWidget::clearActions() {
+    for (auto* item : items) {
+        item->deleteLater();
+    }
+    items.clear();
+    hide();
+}
+
+AIChatPanel::AIChatPanel(QWidget* parent) 
+    : QWidget(parent), isAgenticRunning(false), agenticIteration(0) 
+{
     auto* layout = new QVBoxLayout(this);
     chatHistory = new QTextEdit(this);
     chatHistory->setReadOnly(true);
     chatHistory->setPlaceholderText("AI Chat History...");
 
+    actionsPanel = new ProposedActionsWidget(this);
+    actionsPanel->hide();
+
     inputBox = new QTextEdit(this);
     inputBox->setFixedHeight(80);
     inputBox->setPlaceholderText("Type a message or instruction...");
 
-    sendButton = new QPushButton("Send", this);
-    
-    auto& settings = SettingsManager::instance();
-    if (settings.getProviderType() == "Gemini") {
-        provider = std::make_unique<GeminiProvider>(settings.getGeminiApiKey(), settings.getGeminiEndpoint());
-    } else if (settings.getProviderType() == "Claude") {
-        provider = std::make_unique<ClaudeProvider>(settings.getClaudeApiKey(), settings.getClaudeEndpoint());
-    } else if (settings.getProviderType() == "Antigravity AI") {
-        provider = std::make_unique<AntigravityProvider>(settings.getAntigravityApiKey(), settings.getAntigravityEndpoint());
-    } else {
-        provider = std::make_unique<OllamaProvider>(settings.getOllamaEndpoint());
-    }
+    auto* inputControlLayout = new QHBoxLayout();
+    agenticModeCheck = new QCheckBox("Agentic Loop (Auto-Fix Build)", this);
+    agenticModeCheck->setStyleSheet("QCheckBox { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                    "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #3e4452; border-radius: 3px; background-color: #1e1e1e; }"
+                                    "QCheckBox::indicator:checked { background-color: #98c379; border-color: #7cb057; }");
 
-    auto* actionLayout = new QHBoxLayout();
-    auto* applyBtn = new QPushButton("Apply to Editor", this);
-    auto* newPageBtn = new QPushButton("New Page", this);
-    actionLayout->addWidget(applyBtn);
-    actionLayout->addWidget(newPageBtn);
+    sendButton = new QPushButton("Send", this);
+    sendButton->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-family: 'Segoe UI', Arial; font-size: 12px; }"
+                              "QPushButton:hover { background-color: #4db5ff; }");
+
+    inputControlLayout->addWidget(agenticModeCheck);
+    inputControlLayout->addWidget(sendButton);
 
     layout->addWidget(chatHistory);
+    layout->addWidget(actionsPanel);
     layout->addWidget(inputBox);
-    layout->addWidget(sendButton);
-    layout->addLayout(actionLayout);
+    layout->addLayout(inputControlLayout);
 
     connect(sendButton, &QPushButton::clicked, this, &AIChatPanel::sendPrompt);
-
-    connect(applyBtn, &QPushButton::clicked, this, [this]() {
-        if (!lastExtractedCode.isEmpty()) emit applyToEditor(lastExtractedCode);
-        else QMessageBox::warning(this, "AI IDE", "No code detected in the AI's last response to apply.");
-    });
-
-    connect(newPageBtn, &QPushButton::clicked, this, [this]() {
-        if (!lastExtractedCode.isEmpty()) emit createNewFile(lastExtractedCode);
-        else QMessageBox::warning(this, "AI IDE", "No code detected in the AI's last response to create a page.");
-    });
+    connect(actionsPanel, &ProposedActionsWidget::executeRequested, this, &AIChatPanel::executeActions);
+    connect(actionsPanel, &ProposedActionsWidget::previewAction, this, &AIChatPanel::handlePreview);
 }
 
 void AIChatPanel::sendPrompt() {
+    if (isAgenticRunning) {
+        chatHistory->append("<br><b style='color:#e5c07b;'>[Agent Stopped]</b> Loop cancelled by user.");
+        stopAgenticLoop();
+        return;
+    }
+
     QString prompt = inputBox->toPlainText().trimmed();
     if (prompt.isEmpty()) return;
 
-    chatHistory->append("<b>You:</b> " + prompt);
-    lastExtractedCode.clear();
+    if (agenticModeCheck->isChecked()) {
+        isAgenticRunning = true;
+        agenticIteration = 1;
+        chatHistory->append("<br><b style='color:#61afef;'>[Agent Mode Enabled]</b> Starting autonomous edit-and-build pipeline...");
+    }
+
+    queryAI(prompt, false);
+}
+
+void AIChatPanel::stopAgenticLoop() {
+    isAgenticRunning = false;
+    sendButton->setEnabled(true);
+    sendButton->setText("Send");
+}
+
+void AIChatPanel::handleBuildFinished(int exitCode, const QString& buildErrors) {
+    if (!isAgenticRunning) return;
+
+    if (exitCode == 0) {
+        chatHistory->append("<br><b style='color:#98c379;'>[Agent Success]</b> Build succeeded! All changes compiled and linked successfully.");
+        stopAgenticLoop();
+        return;
+    }
+
+    chatHistory->append(QString("<br><b style='color:#e06c75;'>[Agent Build Failed]</b> Build failed (Iteration %1 of %2). Found %3 errors.")
+                         .arg(agenticIteration)
+                         .arg(maxAgenticIterations)
+                         .arg(buildErrors.count('\n')));
+
+    if (agenticIteration >= maxAgenticIterations) {
+        chatHistory->append("<br><b style='color:#e06c75;'>[Agent Failed]</b> Reached max iterations (5) without succeeding. Stopping loop.");
+        stopAgenticLoop();
+        return;
+    }
+
+    chatHistory->append("<b>Agent:</b> Asking AI for surgical corrections to resolve the build errors...");
+    QApplication::processEvents();
+
+    QString followUpPrompt = QString("The build failed with the following compilation errors:\n\n%1\n\n"
+                                     "Please review the errors and provide surgical SEARCH/REPLACE blocks in the affected files to correct them.")
+                                     .arg(buildErrors);
+
+    agenticIteration++;
+    queryAI(followUpPrompt, true);
+}
+
+void AIChatPanel::queryAI(const QString& prompt, bool isAutoFix) {
+    if (prompt.isEmpty()) return;
+
+    if (!isAutoFix) {
+        chatHistory->append("<b>You:</b> " + prompt);
+        actionsPanel->clearActions();
+    }
+
+    sendButton->setEnabled(true);
+    sendButton->setText(isAgenticRunning ? "Stop Agent" : "Thinking...");
+    QApplication::processEvents();
+
+    // Context Gathering
+    QString currentFilePath = "";
+    QString currentFileContent = "";
+    QString baseDir = "";
+    emit requestActiveFileContext(currentFilePath, currentFileContent, baseDir);
+
+    QString contextStr = QString("\n\n=== USER ACTIVE EDITOR CONTEXT ===\n"
+                                 "Current Workspace Base Directory: %1\n")
+                                 .arg(baseDir);
+
+    if (!currentFilePath.isEmpty()) {
+        QString relativePath = QDir(baseDir).relativeFilePath(currentFilePath);
+        contextStr += QString("Active file path (relative to base): %1\n"
+                              "Active file content:\n"
+                              "```cpp\n%2\n```\n")
+                              .arg(relativePath)
+                              .arg(currentFileContent);
+    } else {
+        contextStr += "No file is currently active/open in the editor.\n";
+    }
+
+    QString systemInstructions = 
+        "\n\n=== SYSTEM INSTRUCTIONS FOR ACTIONS ===\n"
+        "You have the capability to create and edit files directly in the user's workspace. "
+        "Analyze the user's prompt. If they want to modify code or create files, choose the appropriate action(s) from the list below and embed the code block inside XML tags in your response. "
+        "Any regular commentary should be outside these tags.\n\n"
+        "Available Action Tags:\n"
+        "1. Create a brand new file:\n"
+        "   <create_file path=\"relative/path/to/file\" description=\"what this file does\">\n"
+        "   ```cpp\n"
+        "   // complete content here\n"
+        "   ```\n"
+        "   </create_file>\n\n"
+        "2. Modify an existing file in the project (use SEARCH/REPLACE block to specify only what lines to change):\n"
+        "   <modify_file path=\"relative/path/to/file\" description=\"what was changed\">\n"
+        "   <<<<<<< SEARCH\n"
+        "   // Exact lines to find in the original file\n"
+        "   =======\n"
+        "   // Replacement lines\n"
+        "   >>>>>>> REPLACE\n"
+        "   </modify_file>\n\n"
+        "3. Modify the file currently open in the active editor (use SEARCH/REPLACE block):\n"
+        "   <modify_current_editor description=\"what was changed\">\n"
+        "   <<<<<<< SEARCH\n"
+        "   // Exact lines to find in the active editor\n"
+        "   =======\n"
+        "   // Replacement lines\n"
+        "   >>>>>>> REPLACE\n"
+        "   </modify_current_editor>\n\n"
+        "4. Insert a small snippet of code at the user's current cursor position:\n"
+        "   <insert_at_cursor description=\"what is inserted\">\n"
+        "   ```cpp\n"
+        "   // code snippet here\n"
+        "   ```\n"
+        "   </insert_at_cursor>\n\n"
+        "IMPORTANT RULES:\n"
+        "- The path must be a relative path from the project root.\n"
+        "- For modify_file and modify_current_editor, always use the SEARCH/REPLACE block schema to modify only the targeted sections. You can write multiple SEARCH/REPLACE hunks within a single action if necessary.\n"
+        "- For create_file, provide the COMPLETE file content inside standard markdown code block tags.\n"
+        "- Do not put spaces around attribute equal signs (e.g. use path=\"file.cpp\" not path = \"file.cpp\").\n";
 
     // Re-initialize provider on the fly based on latest settings
     auto& settings = SettingsManager::instance();
@@ -1594,34 +1953,165 @@ void AIChatPanel::sendPrompt() {
     }
 
     AIRequest req;
-    req.prompt = prompt.toStdString();
+    req.prompt = prompt.toStdString() + contextStr.toStdString() + systemInstructions.toStdString();
     AIResponse res = provider->send(req);
 
-    chatHistory->append("<b>AI:</b> " + QString::fromStdString(res.text));
-    inputBox->clear();
+    QString responseText = QString::fromStdString(res.text);
+
+    // Parse actions out
+    QVector<AIAction> actions;
+    QRegularExpression actionRegex("(?s)<(create_file|modify_file|modify_current_editor|insert_at_cursor)(?:\\s+path=\"([^\"]*)\")?\\s+description=\"([^\"]*)\"\\s*>\\s*(?:```(?:[a-zA-Z0-9+#]+)?\\s*\\n?)?(.*?)(?:\\s*```)?\\s*</\\1>");
+    QRegularExpressionMatchIterator actionIt = actionRegex.globalMatch(responseText);
+    while (actionIt.hasNext()) {
+        QRegularExpressionMatch match = actionIt.next();
+        AIAction action;
+        action.type = match.captured(1);
+        action.path = match.captured(2);
+        action.description = match.captured(3);
+        action.content = match.captured(4).trimmed();
+        actions.append(action);
+    }
+
+    // Fallback: If no action tags but we have standard code blocks
+    if (actions.isEmpty()) {
+        QRegularExpression fallbackCodeRegex("(?s)```(?:[a-zA-Z0-9+#]+)?\\s*\\n?(.*?)\\n?```");
+        QRegularExpressionMatchIterator codeIt = fallbackCodeRegex.globalMatch(responseText);
+        int blockIdx = 1;
+        while (codeIt.hasNext()) {
+            QRegularExpressionMatch match = codeIt.next();
+            QString code = match.captured(1).trimmed();
+            if (!code.isEmpty()) {
+                AIAction action;
+                if (!currentFilePath.isEmpty()) {
+                    action.type = "modify_current_editor";
+                    action.description = QString("Apply code block #%1 to active editor").arg(blockIdx);
+                } else {
+                    action.type = "create_file";
+                    action.path = "untitled_code.cpp";
+                    action.description = QString("Create new file with code block #%1").arg(blockIdx);
+                }
+                action.content = code;
+                actions.append(action);
+                blockIdx++;
+            }
+        }
+    }
+
+    // Strip actions from text display
+    QString cleanText = responseText;
+    cleanText.replace(actionRegex, "");
+    cleanText = cleanText.trimmed();
+    if (cleanText.isEmpty()) {
+        cleanText = "I have proposed some changes for you. See the Action Plan below.";
+    }
+
+    chatHistory->append("<b>AI:</b> " + cleanText);
+
+    if (!isAutoFix) {
+        inputBox->clear();
+    }
 
     QString summary = QString("[%1] %2").arg(QDateTime::currentDateTime().toString("hh:mm")).arg(prompt.left(30) + "...");
     emit promptArchived(summary);
 
-    // Extract code block from Markdown (Robust Regex)
-    QRegularExpression codeRegex("(?s)```(?:[a-zA-Z0-9+#]+)?\\s*\\n?(.*?)(?:```|$)");
-    QRegularExpressionMatch match = codeRegex.match(QString::fromStdString(res.text));
-    if (match.hasMatch()) {
-        lastExtractedCode = match.captured(1).trimmed();
+    sendButton->setEnabled(true);
+    sendButton->setText(isAgenticRunning ? "Stop Agent" : "Send");
+
+    if (!actions.isEmpty()) {
+        actionsPanel->setActions(actions);
         
-        QString tempPath = QDir::tempPath() + "/ai_last_chat_code.txt";
-        QFile tempFile(tempPath);
-        if (tempFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&tempFile);
-            out << lastExtractedCode;
-            tempFile.close();
+        if (isAgenticRunning) {
+            chatHistory->append("<br><b style='color:#61afef;'>[Agent]</b> Automatically applying proposed fixes...");
+            QApplication::processEvents();
+
+            int successCount = 0;
+            for (const auto& act : actions) {
+                emit executeAction(act);
+                successCount++;
+            }
+            actionsPanel->clearActions();
+
+            chatHistory->append(QString("<b>[Agent]</b> Starting auto-fix build iteration %1...").arg(agenticIteration));
+            QApplication::processEvents();
+            emit requestBuildRun();
+        }
+    } else {
+        if (isAgenticRunning) {
+            chatHistory->append("<br><b style='color:#e06c75;'>[Agent Error]</b> AI returned no code actions. Stopping loop.");
+            stopAgenticLoop();
         }
     }
 }
+
+void AIChatPanel::executeActions() {
+    QVector<AIAction> checked = actionsPanel->getCheckedActions();
+    if (checked.isEmpty()) {
+        QMessageBox::information(this, "AI Actions", "No actions selected to execute.");
+        return;
+    }
+
+    int successCount = 0;
+    for (const auto& action : checked) {
+        emit executeAction(action);
+        successCount++;
+    }
+
+    actionsPanel->clearActions();
+
+    if (agenticModeCheck->isChecked()) {
+        isAgenticRunning = true;
+        agenticIteration = 1;
+        chatHistory->append("<br><b style='color:#61afef;'>[Agent Mode Activated]</b> Starting auto-fix build iteration 1...");
+        QApplication::processEvents();
+        emit requestBuildRun();
+    } else {
+        QMessageBox::information(this, "AI Actions", QString("Successfully applied %1 actions.").arg(successCount));
+    }
+}
+
+void AIChatPanel::handlePreview(const AIAction& action) {
+    QString originalContent = "";
+    QString currentFilePath = "";
+    QString baseDir = "";
+    emit requestActiveFileContext(currentFilePath, originalContent, baseDir);
+
+    if (action.type == "modify_current_editor") {
+        // originalContent already contains the current editor content
+    } else if (action.type == "modify_file") {
+        QString absPath = QFileInfo(action.path).isAbsolute()
+            ? action.path
+            : QDir(baseDir).absoluteFilePath(action.path);
+        QFile file(absPath);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            originalContent = QTextStream(&file).readAll();
+            file.close();
+        }
+    }
+
+    bool success = true;
+    QString errorMsg = "";
+    QString modifiedContent = applySearchReplace(originalContent, action.content, success, errorMsg);
+
+    if (!success) {
+        QMessageBox::warning(this, "AI Action Warning", QString("Warning: Some hunks failed to apply.\n%1").arg(errorMsg));
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("AI Diff Preview - %1").arg(action.path.isEmpty() ? "Current File" : action.path));
+    dlg.resize(900, 600);
+    auto* layout = new QVBoxLayout(&dlg);
+    auto* diffView = new DiffView(&dlg);
+    diffView->setTexts(originalContent, modifiedContent);
+    layout->addWidget(diffView);
+
+    auto* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok, &dlg);
+    layout->addWidget(buttonBox);
+    connect(buttonBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+
+    dlg.exec();
+}
 """)
 
-# ---------------------------------------------------------
-# LSP Client Wrapper (talking to clangd Language Server)
 # ---------------------------------------------------------
 write(f"{ROOT}/src/ui/LspClient.hpp", r"""#pragma once
 #include <QObject>
@@ -1646,11 +2136,13 @@ public:
     int requestCompletion(const QString& filePath, int line, int character);
     int requestDefinition(const QString& filePath, int line, int character);
     int requestReferences(const QString& filePath, int line, int character);
+    int requestDocumentSymbols(const QString& filePath);
 
 signals:
     void completionReady(int id, const QJsonArray& items);
     void definitionReady(int id, const QString& filePath, int line);
     void referencesReady(int id, const QJsonArray& locations);
+    void documentSymbolsReady(int id, const QJsonArray& symbols);
 
 private slots:
     void readOutput();
@@ -1818,6 +2310,8 @@ void LspClient::parseMessage(const QByteArray& payload) {
             emit definitionReady(id, targetPath, targetLine);
         } else if (method == "textDocument/references") {
             emit referencesReady(id, obj["result"].toArray());
+        } else if (method == "textDocument/documentSymbol") {
+            emit documentSymbolsReady(id, obj["result"].toArray());
         }
     }
 }
@@ -1904,6 +2398,19 @@ int LspClient::requestReferences(const QString& filePath, int line, int characte
     params["context"] = context;
 
     sendRequest("textDocument/references", params, id);
+    return id;
+}
+
+int LspClient::requestDocumentSymbols(const QString& filePath) {
+    int id = nextId++;
+    pendingRequests[id] = "textDocument/documentSymbol";
+
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    params["textDocument"] = textDocument;
+
+    sendRequest("textDocument/documentSymbol", params, id);
     return id;
 }
 """)
@@ -2833,16 +3340,23 @@ write(f"{ROOT}/src/ui/GitWidget.hpp", r"""#pragma once
 #include <QLineEdit>
 #include <QProcess>
 
+class GitHistoryWidget;
+
 class GitWidget : public QWidget {
     Q_OBJECT
 public:
     explicit GitWidget(QWidget* parent = nullptr);
     void setRootPath(const QString& path);
 
-private slots:
+signals:
+    void conflictResolutionRequested(const QString& filePath);
+
+public slots:
     void refreshStatus();
     void commitChanges();
     void syncChanges();
+
+private slots:
     void onProcessFinished(int exitCode);
 
 private:
@@ -2852,26 +3366,41 @@ private:
     QProcess* gitProcess;
     QString currentMode;
     QStringList filesToStage;
+
+    GitHistoryWidget* historyWidget;
 };
 """)
 
 write(f"{ROOT}/src/ui/GitWidget.cpp", r"""#include "GitWidget.hpp"
+#include "GitHistoryWidget.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QMessageBox>
+#include <QTabWidget>
+#include <QDir>
 
 GitWidget::GitWidget(QWidget* parent)
     : QWidget(parent), gitProcess(new QProcess(this))
 {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(5, 5, 5, 5);
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* tabs = new QTabWidget(this);
+    tabs->setStyleSheet("QTabWidget::pane { border: none; }"
+                        "QTabBar::tab { background-color: #21252b; color: #abb2bf; padding: 6px 10px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                        "QTabBar::tab:selected { background-color: #1e1e1e; color: #ffffff; border-bottom: 2px solid #61afef; }");
+
+    // Tab 1: Staging and Commit Changes
+    auto* changesTab = new QWidget(this);
+    auto* layout = new QVBoxLayout(changesTab);
+    layout->setContentsMargins(4, 4, 4, 4);
 
     auto* toolbar = new QHBoxLayout();
     auto* refreshBtn = new QPushButton("🔄 Refresh", this);
     auto* syncBtn = new QPushButton("🚀 Sync", this);
     
-    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }"
+    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                        "QPushButton:hover { background-color: #3e4452; color: #ffffff; }";
     refreshBtn->setStyleSheet(btnStyle);
     syncBtn->setStyleSheet(btnStyle);
@@ -2881,24 +3410,41 @@ GitWidget::GitWidget(QWidget* parent)
     layout->addLayout(toolbar);
 
     statusList = new QListWidget(this);
-    statusList->setStyleSheet("QListWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; }"
+    statusList->setStyleSheet("QListWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                               "QListWidget::item { padding: 4px; }");
     layout->addWidget(statusList);
 
     commitMessageEdit = new QLineEdit(this);
     commitMessageEdit->setPlaceholderText("Commit message...");
-    commitMessageEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; }");
+    commitMessageEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }");
     layout->addWidget(commitMessageEdit);
 
     auto* commitBtn = new QPushButton("Commit Staged Changes", this);
-    commitBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 8px; font-weight: bold; font-family: 'Segoe UI', Arial; }"
+    commitBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 8px; font-weight: bold; font-family: 'Segoe UI', Arial; font-size: 11px; }"
                              "QPushButton:hover { background-color: #528bff; }");
     layout->addWidget(commitBtn);
+
+    tabs->addTab(changesTab, "Changes");
+
+    // Tab 2: Commit History
+    historyWidget = new GitHistoryWidget(this);
+    tabs->addTab(historyWidget, "History");
+
+    mainLayout->addWidget(tabs);
 
     connect(refreshBtn, &QPushButton::clicked, this, &GitWidget::refreshStatus);
     connect(syncBtn, &QPushButton::clicked, this, &GitWidget::syncChanges);
     connect(commitBtn, &QPushButton::clicked, this, &GitWidget::commitChanges);
     connect(gitProcess, &QProcess::finished, this, &GitWidget::onProcessFinished);
+    
+    connect(statusList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item->text().startsWith("[Conflict]")) {
+            QString relPath = item->text().mid(10).trimmed();
+            QString absPath = QDir(rootPath).absoluteFilePath(relPath);
+            emit conflictResolutionRequested(absPath);
+        }
+    });
+
     connect(gitProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
         statusList->clear();
         auto* item = new QListWidgetItem(statusList);
@@ -2908,6 +3454,7 @@ GitWidget::GitWidget(QWidget* parent)
 
 void GitWidget::setRootPath(const QString& path) {
     rootPath = path;
+    if (historyWidget) historyWidget->setRootPath(path);
     refreshStatus();
 }
 
@@ -2918,6 +3465,7 @@ void GitWidget::refreshStatus() {
     currentMode = "status";
     gitProcess->setWorkingDirectory(rootPath);
     gitProcess->start("git", QStringList() << "status" << "--porcelain");
+    if (historyWidget) historyWidget->refreshHistory();
 }
 
 void GitWidget::commitChanges() {
@@ -2965,9 +3513,18 @@ void GitWidget::onProcessFinished(int exitCode) {
             QStringList lines = out.split("\n", Qt::SkipEmptyParts);
             for (const QString& line : lines) {
                 auto* item = new QListWidgetItem(statusList);
-                item->setText(line);
                 item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
                 item->setCheckState(Qt::Checked);
+
+                QString status = line.left(2);
+                QString path = line.mid(3).trimmed();
+
+                if (status == "UU" || status == "UD" || status == "DU" || status == "AA" || status == "AU") {
+                    item->setText("[Conflict] " + path);
+                    item->setForeground(QBrush(QColor("#e06c75")));
+                } else {
+                    item->setText(line);
+                }
             }
         } else {
             auto* item = new QListWidgetItem(statusList);
@@ -3296,12 +3853,15 @@ public:
 
 signals:
     void fileChanged(const QString& path);
+    void fileSaved(const QString& path);
     void closeRequested();
 
 private:
     CodeEditor* editor;
-    QPushButton* closeButton;
+    QPushButton* saveButton;
     QPushButton* saveAsButton;
+    QPushButton* closeButton;
+    QPushButton* openHtmlButton;
     QString filePath;
     CppHighlighter* highlighter;
 };
@@ -3384,6 +3944,9 @@ write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include <QTextStream>
 #include <QFileDialog>
 #include <QDir>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTextBlock>
@@ -3394,7 +3957,7 @@ write(f"{ROOT}/src/ui/CustomEditor.cpp", r"""#include "CustomEditor.hpp"
 #include <QMainWindow>
 
 CustomEditor::CustomEditor(QWidget* parent)
-    : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
+    : QWidget(parent), saveButton(nullptr), saveAsButton(nullptr), closeButton(nullptr), openHtmlButton(nullptr), highlighter(nullptr)
 {
     auto* mainLayout = new QVBoxLayout(this);
 
@@ -3406,15 +3969,51 @@ CustomEditor::CustomEditor(QWidget* parent)
     auto* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch();
     
+    saveButton = new QPushButton("Save", this);
+    saveButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                           "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+
     saveAsButton = new QPushButton("Save As", this);
+    saveAsButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                             "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+
     closeButton = new QPushButton("Close", this);
+    closeButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                            "QPushButton:hover { background-color: #e06c75; color: #ffffff; border-color: #d15a63; }");
+
+    openHtmlButton = new QPushButton("Open HTML", this);
+    openHtmlButton->setStyleSheet("QPushButton { background-color: #98c379; color: #1e1e1e; border: 1px solid #7cb057; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                               "QPushButton:hover { background-color: #a6db87; color: #111111; }");
     
+    buttonLayout->addWidget(saveButton);
     buttonLayout->addWidget(saveAsButton);
     buttonLayout->addWidget(closeButton);
+    buttonLayout->addWidget(openHtmlButton);
     mainLayout->addLayout(buttonLayout);
 
-    connect(closeButton, &QPushButton::clicked, this, &CustomEditor::closeRequested);
+    connect(saveButton, &QPushButton::clicked, this, &CustomEditor::saveFile);
     connect(saveAsButton, &QPushButton::clicked, this, &CustomEditor::saveAsFile);
+    connect(closeButton, &QPushButton::clicked, this, &CustomEditor::closeRequested);
+
+    connect(openHtmlButton, &QPushButton::clicked, this, [this]() {
+        QString path = currentFilePath();
+        if (path.endsWith(".html", Qt::CaseSensitivity::CaseInsensitive) || path.endsWith(".htm", Qt::CaseSensitivity::CaseInsensitive)) {
+            saveFile();
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        } else {
+            QString baseDir = path.isEmpty() ? QDir::currentPath() : QFileInfo(path).absolutePath();
+            QString tempPath = QDir(baseDir).absoluteFilePath("preview_temp.html");
+            QFile file(tempPath);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&file);
+                out << editor->toPlainText();
+                file.close();
+                QDesktopServices::openUrl(QUrl::fromLocalFile(tempPath));
+            } else {
+                QMessageBox::warning(this, "Open HTML", "Please save the file first.");
+            }
+        }
+    });
 
     connect(editor, &QPlainTextEdit::textChanged, this, [this]() {
         if (!filePath.isEmpty()) {
@@ -3448,6 +4047,8 @@ void CustomEditor::saveFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    f.close();
+    emit fileSaved(filePath);
 }
 
 void CustomEditor::saveAsFile() {
@@ -3467,7 +4068,9 @@ void CustomEditor::saveAsFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    f.close();
     editor->setFilePath(fileName);
+    emit fileSaved(filePath);
 }
 
 QString CustomEditor::currentFilePath() const {
@@ -3827,6 +4430,7 @@ class TerminalPane : public QWidget {
     Q_OBJECT
 public:
     explicit TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit = nullptr, QProcess* existingProc = nullptr, QWidget* parent = nullptr);
+    explicit TerminalPane(const QString& shellPath, const QStringList& shellArgs, QPlainTextEdit* existingEdit = nullptr, QProcess* existingProc = nullptr, QWidget* parent = nullptr);
     ~TerminalPane() override;
 
 signals:
@@ -3847,6 +4451,7 @@ private:
     QString ansiToHtml(const QString& ansiText);
 
     QString shell;
+    QStringList shellArgs;
     QPlainTextEdit* terminalEdit;
     QProcess* process;
     QWidget* toolbar;
@@ -3863,6 +4468,7 @@ class TerminalWidget : public QWidget {
     Q_OBJECT
 public:
     explicit TerminalWidget(const QString& shellPath, QWidget* parent = nullptr);
+    explicit TerminalWidget(const QString& shellPath, const QStringList& shellArgs, QWidget* parent = nullptr);
 private:
     TerminalPane* rootPane;
 };
@@ -3877,8 +4483,14 @@ write(f"{ROOT}/src/ui/TerminalWidget.cpp", r"""#include "TerminalWidget.hpp"
 #include <QLabel>
 
 TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit, QProcess* existingProc, QWidget* parent)
+    : TerminalPane(shellPath, QStringList(), existingEdit, existingProc, parent)
+{
+}
+
+TerminalPane::TerminalPane(const QString& shellPath, const QStringList& shellArgs, QPlainTextEdit* existingEdit, QProcess* existingProc, QWidget* parent)
     : QWidget(parent),
       shell(shellPath),
+      shellArgs(shellArgs),
       terminalEdit(existingEdit),
       process(existingProc),
       isSplit(false),
@@ -3896,7 +4508,11 @@ TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdi
     auto* toolbarLayout = new QHBoxLayout(toolbar);
     toolbarLayout->setContentsMargins(10, 2, 10, 2);
     
-    QString label = shellPath.contains("powershell") ? "PowerShell" : "Bash";
+    QString label = "Terminal";
+    if (shellPath.contains("powershell")) label = "PowerShell";
+    else if (shellPath.contains("bash")) label = "Bash";
+    else if (shellPath.contains("ssh")) label = "SSH Connection";
+    
     auto* shellLabel = new QLabel(label, this);
     shellLabel->setStyleSheet("QLabel { color: #abb2bf; font-weight: bold; font-family: 'Segoe UI', Arial; }");
     toolbarLayout->addWidget(shellLabel);
@@ -3949,8 +4565,8 @@ TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdi
         
         terminalEdit->installEventFilter(this);
 
-        QStringList args;
-        if (shellPath.contains("bash.exe")) {
+        QStringList args = shellArgs;
+        if (args.isEmpty() && shellPath.contains("bash.exe")) {
             args << "--login" << "-i";
         }
         process->start(shellPath, args);
@@ -4213,11 +4829,16 @@ QString TerminalPane::ansiToHtml(const QString& ansiText) {
 }
 
 TerminalWidget::TerminalWidget(const QString& shellPath, QWidget* parent)
+    : TerminalWidget(shellPath, QStringList(), parent)
+{
+}
+
+TerminalWidget::TerminalWidget(const QString& shellPath, const QStringList& shellArgs, QWidget* parent)
     : QWidget(parent)
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    rootPane = new TerminalPane(shellPath, nullptr, nullptr, this);
+    rootPane = new TerminalPane(shellPath, shellArgs, nullptr, nullptr, this);
     layout->addWidget(rootPane);
 }
 """)
@@ -4309,12 +4930,37 @@ write(f"{ROOT}/src/ui/DebugWidget.hpp", r"""#pragma once
 #include <QWidget>
 #include <QProcess>
 #include <QString>
+#include <vector>
+#include <utility>
 
 class QPushButton;
 class QPlainTextEdit;
 class QTreeWidget;
 class QLineEdit;
 class QLabel;
+
+enum VisType { VisNone, VisArray, VisMatrix, VisGraph };
+
+class VisualInspectorWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit VisualInspectorWidget(QWidget* parent = nullptr);
+    void inspectVariable(const QString& name, const QString& type, const QString& val);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    QString varName;
+    QString varType;
+    QString varVal;
+
+    VisType visType;
+    std::vector<double> arrayData;
+    std::vector<std::vector<double>> matrixData;
+    std::vector<int> graphNodes;
+    std::vector<std::pair<int, int>> graphEdges;
+};
 
 class DebugWidget : public QWidget {
     Q_OBJECT
@@ -4337,7 +4983,6 @@ private:
     void updateVariables();
     void addVariable(const QString& name, const QString& type, const QString& val);
     
-    // Simulation mode helpers
     void enterSimulationMode();
     void runSimulationStep();
 
@@ -4355,6 +5000,7 @@ private:
     QPlainTextEdit* consoleLog;
     QLineEdit* cmdInput;
     QTreeWidget* variablesTree;
+    VisualInspectorWidget* visualInspector;
 };
 """)
 
@@ -4373,6 +5019,11 @@ write(f"{ROOT}/src/ui/DebugWidget.cpp", r"""#include "DebugWidget.hpp"
 #include <QFile>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QRadialGradient>
+#include <QtMath>
+#include <cmath>
 
 DebugWidget::DebugWidget(QWidget* parent)
     : QWidget(parent),
@@ -4430,13 +5081,30 @@ DebugWidget::DebugWidget(QWidget* parent)
 
     splitter->addWidget(consoleContainer);
 
-    // Right container: Variables tree widget
-    variablesTree = new QTreeWidget(this);
+    // Right container: Variables tree widget and Visual Inspector
+    auto* rightContainer = new QWidget(this);
+    auto* rightLayout = new QVBoxLayout(rightContainer);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(0);
+
+    auto* rightSplitter = new QSplitter(Qt::Vertical, rightContainer);
+
+    variablesTree = new QTreeWidget(rightContainer);
     variablesTree->setColumnCount(3);
     variablesTree->setHeaderLabels({"Name", "Type", "Value"});
     variablesTree->header()->setSectionResizeMode(QHeaderView::Stretch);
-    variablesTree->setStyleSheet("QTreeWidget { background-color: #1e1e1e; color: #d4d4d4; } QHeaderView::section { background-color: #2d2d2d; color: #ffffff; }");
-    splitter->addWidget(variablesTree);
+    variablesTree->setStyleSheet("QTreeWidget { background-color: #21252b; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                  "QHeaderView::section { background-color: #2c313c; color: #abb2bf; border: 1px solid #181a1f; padding: 4px; }");
+
+    visualInspector = new VisualInspectorWidget(rightContainer);
+
+    rightSplitter->addWidget(variablesTree);
+    rightSplitter->addWidget(visualInspector);
+    rightSplitter->setStretchFactor(0, 1);
+    rightSplitter->setStretchFactor(1, 1);
+
+    rightLayout->addWidget(rightSplitter);
+    splitter->addWidget(rightContainer);
 
     mainLayout->addWidget(splitter);
 
@@ -4447,6 +5115,12 @@ DebugWidget::DebugWidget(QWidget* parent)
     connect(stepIntoBtn, &QPushButton::clicked, this, &DebugWidget::stepInto);
     connect(continueBtn, &QPushButton::clicked, this, &DebugWidget::continueDebug);
     connect(cmdInput, &QLineEdit::returnPressed, this, &DebugWidget::sendManualCommand);
+    
+    connect(variablesTree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
+        if (item && visualInspector) {
+            visualInspector->inspectVariable(item->text(0), item->text(1), item->text(2));
+        }
+    });
 }
 
 DebugWidget::~DebugWidget() {
@@ -4657,22 +5331,24 @@ void DebugWidget::updateVariables() {
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
+            addVariable("my_array", "std::vector<int>", "[12, 45, 78, 34, 89, 56]");
+            addVariable("my_matrix", "int[3][3]", "[[10, 20, 30], [40, 50, 60], [70, 80, 90]]");
         } else if (simStepCount == 2) {
             addVariable("argc", "int", "1");
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
-            addVariable("loopCount", "int", "0");
+            addVariable("my_array", "std::vector<int>", "[18, 55, 78, 22, 99, 44]");
+            addVariable("my_matrix", "int[3][3]", "[[15, 25, 35], [45, 55, 65], [75, 85, 95]]");
+            addVariable("my_graph", "Graph", "{\"nodes\": [1, 2, 3, 4], \"edges\": [[1, 2], [2, 3], [3, 4], [4, 1]]}");
         } else {
             addVariable("argc", "int", "1");
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
-            addVariable("loopCount", "int", QString::number(simStepCount - 2));
-            addVariable("status", "QString", "\"Processing window event loop...\"");
+            addVariable("my_array", "std::vector<int>", QString("[%1, 40, 60, 80, 100, 20]").arg(simStepCount * 10));
+            addVariable("my_matrix", "int[3][3]", QString("[[%1, 20, 30], [40, %1, 60], [70, 80, %1]]").arg(simStepCount * 5));
+            addVariable("my_graph", "Graph", QString("{\"nodes\": [1, 2, 3, 4, 5], \"edges\": [[1, 2], [2, 3], [3, 4], [4, 5], [5, %1]]}").arg((simStepCount % 2 == 0) ? "1" : "3"));
         }
     }
 }
@@ -4692,6 +5368,398 @@ void DebugWidget::runSimulationStep() {
     }
     
     updateVariables();
+}
+
+VisualInspectorWidget::VisualInspectorWidget(QWidget* parent)
+    : QWidget(parent), visType(VisNone)
+{
+    setMinimumHeight(180);
+}
+
+void VisualInspectorWidget::inspectVariable(const QString& name, const QString& type, const QString& val) {
+    varName = name;
+    varType = type;
+    varVal = val;
+    
+    arrayData.clear();
+    matrixData.clear();
+    graphNodes.clear();
+    graphEdges.clear();
+    visType = VisNone;
+
+    QString cleanVal = val.trimmed();
+    
+    // Parse Graph
+    if (cleanVal.contains("nodes") && cleanVal.contains("edges")) {
+        visType = VisGraph;
+        QRegularExpression nodeRegex(R"("nodes"\s*:\s*\[([0-9,\s]*)\])");
+        auto nodeMatch = nodeRegex.match(cleanVal);
+        if (nodeMatch.hasMatch()) {
+            QStringList ns = nodeMatch.captured(1).split(',');
+            for (const QString& n : ns) {
+                QString trimmed = n.trimmed();
+                if (!trimmed.isEmpty()) graphNodes.push_back(trimmed.toInt());
+            }
+        }
+        QRegularExpression edgeRegex(R"("edges"\s*:\s*\[\s*(\[[0-9,\s,]*\]\s*,?\s*)*\s*\])");
+        QRegularExpression pairRegex(R"(\[\s*(\d+)\s*,\s*(\d+)\s*\])");
+        auto pairIt = pairRegex.globalMatch(cleanVal);
+        while (pairIt.hasNext()) {
+            auto pairMatch = pairIt.next();
+            int u = pairMatch.captured(1).toInt();
+            int v = pairMatch.captured(2).toInt();
+            graphEdges.push_back({u, v});
+        }
+    }
+    // Parse Matrix
+    else if (cleanVal.startsWith("[[") || cleanVal.startsWith("{{")) {
+        visType = VisMatrix;
+        QRegularExpression rowRegex(R"(\[([0-9,\s.-]+)\])");
+        if (cleanVal.startsWith("{")) {
+            rowRegex = QRegularExpression(R"(\{([0-9,\s.-]+)\})");
+        }
+        auto rowIt = rowRegex.globalMatch(cleanVal);
+        while (rowIt.hasNext()) {
+            auto rowMatch = rowIt.next();
+            QStringList cols = rowMatch.captured(1).split(',');
+            std::vector<double> rowData;
+            for (const QString& c : cols) {
+                QString trimmed = c.trimmed();
+                if (!trimmed.isEmpty()) rowData.push_back(trimmed.toDouble());
+            }
+            if (!rowData.empty()) {
+                matrixData.push_back(rowData);
+            }
+        }
+    }
+    // Parse Array
+    else if (cleanVal.startsWith("[") || cleanVal.startsWith("{")) {
+        visType = VisArray;
+        QString inner = cleanVal;
+        if (inner.startsWith("[")) {
+            inner = inner.mid(1, inner.length() - 2);
+        } else {
+            inner = inner.mid(1, inner.length() - 2);
+        }
+        QStringList items = inner.split(',');
+        for (const QString& item : items) {
+            QString trimmed = item.trimmed();
+            if (!trimmed.isEmpty()) {
+                arrayData.push_back(trimmed.toDouble());
+            }
+        }
+    }
+    
+    update();
+}
+
+void VisualInspectorWidget::paintEvent(QPaintEvent* event) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    painter.fillRect(rect(), QColor("#1e1e1e"));
+
+    if (visType == VisNone || (arrayData.empty() && matrixData.empty() && graphNodes.empty())) {
+        painter.setPen(QColor("#5c6370"));
+        painter.setFont(QFont("Segoe UI", 10));
+        painter.drawText(rect(), Qt::AlignCenter, "Select a collection variable (array, matrix, or graph)\nin the variables pane to view graphical visualization.");
+        return;
+    }
+
+    painter.setPen(QColor("#abb2bf"));
+    painter.setFont(QFont("Segoe UI", 9, QFont::Bold));
+    painter.drawText(QRect(10, 10, width() - 20, 20), Qt::AlignLeft | Qt::AlignVCenter, QString("Visualizing: %1 (%2)").arg(varName).arg(varType));
+
+    int contentY = 35;
+    int contentHeight = height() - contentY - 15;
+    int contentWidth = width() - 30;
+    int contentX = 15;
+
+    if (visType == VisArray) {
+        int numElements = arrayData.size();
+        double maxVal = 1e-5;
+        for (double val : arrayData) {
+            if (qAbs(val) > maxVal) maxVal = qAbs(val);
+        }
+
+        int barSpacing = 6;
+        int totalSpacing = barSpacing * (numElements - 1);
+        int barWidth = (contentWidth - totalSpacing) / numElements;
+        if (barWidth < 4) barWidth = 4;
+
+        for (int i = 0; i < numElements; ++i) {
+            double val = arrayData[i];
+            int barHeight = static_cast<int>((qAbs(val) / maxVal) * (contentHeight - 20));
+            int x = contentX + i * (barWidth + barSpacing);
+            int y = contentY + contentHeight - barHeight;
+
+            QLinearGradient gradient(x, y, x, y + barHeight);
+            gradient.setColorAt(0.0, QColor("#61afef"));
+            gradient.setColorAt(1.0, QColor("#4db5ff"));
+            
+            painter.setBrush(gradient);
+            painter.setPen(QColor("#3e4452"));
+            painter.drawRect(x, y, barWidth, barHeight);
+
+            painter.setPen(QColor("#abb2bf"));
+            painter.setFont(QFont("Segoe UI", 8));
+            QString valStr = QString::number(val);
+            painter.drawText(QRect(x - 10, y - 18, barWidth + 20, 15), Qt::AlignCenter, valStr);
+        }
+    }
+    else if (visType == VisMatrix) {
+        int rows = matrixData.size();
+        int cols = 0;
+        double maxVal = 1e-5;
+        for (const auto& r : matrixData) {
+            if (static_cast<int>(r.size()) > cols) cols = r.size();
+            for (double val : r) {
+                if (qAbs(val) > maxVal) maxVal = qAbs(val);
+            }
+        }
+
+        if (rows > 0 && cols > 0) {
+            int cellSizeX = contentWidth / cols;
+            int cellSizeY = contentHeight / rows;
+            int cellSize = qMin(cellSizeX, cellSizeY);
+            if (cellSize < 10) cellSize = 10;
+
+            int startX = contentX + (contentWidth - cellSize * cols) / 2;
+            int startY = contentY + (contentHeight - cellSize * rows) / 2;
+
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < static_cast<int>(matrixData[r].size()); ++c) {
+                    double val = matrixData[r][c];
+                    double ratio = qAbs(val) / maxVal;
+
+                    int red = static_cast<int>(33 + ratio * (152 - 33));
+                    int green = static_cast<int>(37 + ratio * (195 - 37));
+                    int blue = static_cast<int>(43 + ratio * (121 - 43));
+                    QColor cellColor(red, green, blue);
+
+                    int x = startX + c * cellSize;
+                    int y = startY + r * cellSize;
+
+                    painter.setBrush(cellColor);
+                    painter.setPen(QColor("#181a1f"));
+                    painter.drawRect(x, y, cellSize, cellSize);
+
+                    painter.setPen(ratio > 0.5 ? QColor("#1e1e1e") : QColor("#abb2bf"));
+                    painter.setFont(QFont("Segoe UI", 8, QFont::Bold));
+                    painter.drawText(QRect(x, y, cellSize, cellSize), Qt::AlignCenter, QString::number(val));
+                }
+            }
+        }
+    }
+    else if (visType == VisGraph) {
+        int numNodes = graphNodes.size();
+        if (numNodes > 0) {
+            int centerX = contentX + contentWidth / 2;
+            int centerY = contentY + contentHeight / 2;
+            int radius = qMin(contentWidth, contentHeight) / 2 - 25;
+            if (radius < 20) radius = 20;
+
+            QHash<int, QPoint> nodePos;
+            for (int i = 0; i < numNodes; ++i) {
+                double angle = (2.0 * M_PI * i) / numNodes;
+                int x = centerX + static_cast<int>(radius * qCos(angle));
+                int y = centerY + static_cast<int>(radius * qSin(angle));
+                nodePos[graphNodes[i]] = QPoint(x, y);
+            }
+
+            painter.setPen(QPen(QColor("#5c6370"), 2));
+            for (const auto& edge : graphEdges) {
+                if (nodePos.contains(edge.first) && nodePos.contains(edge.second)) {
+                    QPoint p1 = nodePos[edge.first];
+                    QPoint p2 = nodePos[edge.second];
+                    painter.drawLine(p1, p2);
+                }
+            }
+
+            int nodeRadius = 15;
+            for (int i = 0; i < numNodes; ++i) {
+                int nodeId = graphNodes[i];
+                QPoint pos = nodePos[nodeId];
+
+                QRadialGradient grad(pos.x(), pos.y(), nodeRadius);
+                grad.setColorAt(0.0, QColor("#61afef"));
+                grad.setColorAt(1.0, QColor("#4db5ff"));
+
+                painter.setBrush(grad);
+                painter.setPen(QPen(QColor("#ffffff"), 1.5));
+                painter.drawEllipse(pos, nodeRadius, nodeRadius);
+
+                painter.setPen(QColor("#1e1e1e"));
+                painter.setFont(QFont("Segoe UI", 9, QFont::Bold));
+                painter.drawText(QRect(pos.x() - nodeRadius, pos.y() - nodeRadius, nodeRadius * 2, nodeRadius * 2), Qt::AlignCenter, QString::number(nodeId));
+            }
+        }
+    }
+}
+""")
+
+# ---------------------------------------------------------
+# Remote Server Manager (TCP Connection Tester & SSH)
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/RemoteServerWidget.hpp", r"""#pragma once
+#include <QWidget>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QTcpSocket>
+#include <QDateTime>
+
+class RemoteServerWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit RemoteServerWidget(QWidget* parent = nullptr);
+
+signals:
+    void openSshRequested(const QString& host, const QString& port, const QString& user);
+
+private slots:
+    void testTcpConnection();
+    void openSshTerminal();
+    void onConnected();
+    void onError(QAbstractSocket::SocketError socketError);
+
+private:
+    void log(const QString& message);
+
+    QLineEdit* hostInput;
+    QLineEdit* portInput;
+    QLineEdit* userInput;
+    QPushButton* testBtn;
+    QPushButton* sshBtn;
+    QPlainTextEdit* logEdit;
+
+    QTcpSocket* tcpSocket;
+    QDateTime connectionStartTime;
+};
+""")
+
+write(f"{ROOT}/src/ui/RemoteServerWidget.cpp", r"""#include "RemoteServerWidget.hpp"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
+#include <QLabel>
+#include <QStyle>
+
+RemoteServerWidget::RemoteServerWidget(QWidget* parent)
+    : QWidget(parent), tcpSocket(new QTcpSocket(this))
+{
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(8, 8, 8, 8);
+    mainLayout->setSpacing(10);
+
+    auto* headerLabel = new QLabel("Remote Server Manager", this);
+    headerLabel->setStyleSheet("QLabel { color: #61afef; font-family: 'Segoe UI', Arial; font-size: 13px; font-weight: bold; }");
+    mainLayout->addWidget(headerLabel);
+
+    auto* formLayout = new QFormLayout();
+    formLayout->setSpacing(6);
+
+    QString inputStyle = "QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px; font-family: 'Segoe UI', Arial; font-size: 11px; }";
+
+    hostInput = new QLineEdit(this);
+    hostInput->setPlaceholderText("e.g. 192.168.1.100");
+    hostInput->setText("127.0.0.1");
+    hostInput->setStyleSheet(inputStyle);
+
+    portInput = new QLineEdit(this);
+    portInput->setPlaceholderText("e.g. 22");
+    portInput->setText("22");
+    portInput->setStyleSheet(inputStyle);
+
+    userInput = new QLineEdit(this);
+    userInput->setPlaceholderText("e.g. ubuntu");
+    userInput->setText("ubuntu");
+    userInput->setStyleSheet(inputStyle);
+
+    auto* hostLabel = new QLabel("Host:", this);
+    hostLabel->setStyleSheet("color: #abb2bf; font-size: 11px;");
+    auto* portLabel = new QLabel("Port:", this);
+    portLabel->setStyleSheet("color: #abb2bf; font-size: 11px;");
+    auto* userLabel = new QLabel("User:", this);
+    userLabel->setStyleSheet("color: #abb2bf; font-size: 11px;");
+
+    formLayout->addRow(hostLabel, hostInput);
+    formLayout->addRow(portLabel, portInput);
+    formLayout->addRow(userLabel, userInput);
+    mainLayout->addLayout(formLayout);
+
+    auto* btnLayout = new QHBoxLayout();
+    testBtn = new QPushButton("Test TCP", this);
+    sshBtn = new QPushButton("Open SSH", this);
+
+    QString btnStyle = "QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                       "QPushButton:hover { background-color: #3e4452; color: #ffffff; }";
+    testBtn->setStyleSheet(btnStyle);
+    sshBtn->setStyleSheet("QPushButton { background-color: #61afef; color: #1e1e1e; border: none; border-radius: 4px; padding: 6px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                          "QPushButton:hover { background-color: #528bff; }");
+
+    btnLayout->addWidget(testBtn);
+    btnLayout->addWidget(sshBtn);
+    mainLayout->addLayout(btnLayout);
+
+    logEdit = new QPlainTextEdit(this);
+    logEdit->setReadOnly(true);
+    logEdit->setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #98c379; border: 1px solid #3e4452; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 10px; }");
+    mainLayout->addWidget(logEdit);
+
+    connect(testBtn, &QPushButton::clicked, this, &RemoteServerWidget::testTcpConnection);
+    connect(sshBtn, &QPushButton::clicked, this, &RemoteServerWidget::openSshTerminal);
+
+    connect(tcpSocket, &QTcpSocket::connected, this, &RemoteServerWidget::onConnected);
+    connect(tcpSocket, &QTcpSocket::errorOccurred, this, &RemoteServerWidget::onError);
+
+    log("Remote Server manager initialized. Ready to connect.");
+}
+
+void RemoteServerWidget::log(const QString& message) {
+    QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss");
+    logEdit->appendPlainText(QString("[%1] %2").arg(timeStr).arg(message));
+}
+
+void RemoteServerWidget::testTcpConnection() {
+    QString host = hostInput->text().trimmed();
+    int port = portInput->text().toInt();
+
+    if (host.isEmpty() || port <= 0) {
+        log("Error: Host or Port is invalid.");
+        return;
+    }
+
+    log(QString("Testing TCP socket connection to %1:%2...").arg(host).arg(port));
+    testBtn->setEnabled(false);
+    connectionStartTime = QDateTime::currentDateTime();
+    tcpSocket->connectToHost(host, port);
+}
+
+void RemoteServerWidget::openSshTerminal() {
+    QString host = hostInput->text().trimmed();
+    QString port = portInput->text().trimmed();
+    QString user = userInput->text().trimmed();
+
+    if (host.isEmpty() || port.toInt() <= 0 || user.isEmpty()) {
+        log("Error: Host, Port, or User is invalid for SSH.");
+        return;
+    }
+
+    log(QString("Opening SSH terminal shell session for %1@%2:%3...").arg(user).arg(host).arg(port));
+    emit openSshRequested(host, port, user);
+}
+
+void RemoteServerWidget::onConnected() {
+    qint64 latency = connectionStartTime.msecsTo(QDateTime::currentDateTime());
+    log(QString("TCP connection SUCCESSFUL! Target is ONLINE. Latency: %1ms").arg(latency));
+    tcpSocket->disconnectFromHost();
+    testBtn->setEnabled(true);
+}
+
+void RemoteServerWidget::onError(QAbstractSocket::SocketError socketError) {
+    log(QString("TCP connection FAILED: %1").arg(tcpSocket->errorString()));
+    testBtn->setEnabled(true);
 }
 """)
 
@@ -4788,6 +5856,603 @@ WelcomeWidget::WelcomeWidget(QWidget* parent)
     connect(openFolderBtn, &QPushButton::clicked, this, &WelcomeWidget::openFolderRequested);
     connect(buildBtn, &QPushButton::clicked, this, &WelcomeWidget::buildRequested);
     connect(settingsBtn, &QPushButton::clicked, this, &WelcomeWidget::settingsRequested);
+}
+""")
+# ---------------------------------------------------------
+# Outline Widget for AST outline tree view
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/OutlineWidget.hpp", r"""#pragma once
+#include <QWidget>
+#include <QTreeWidget>
+#include <QLineEdit>
+#include <QLabel>
+#include <QJsonArray>
+#include <QJsonObject>
+
+class OutlineWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit OutlineWidget(QWidget* parent = nullptr);
+
+signals:
+    void lineNavigationRequested(int line);
+
+public slots:
+    void updateSymbols(const QJsonArray& symbols);
+    void clearOutline();
+
+private slots:
+    void onFilterChanged(const QString& text);
+    void onItemClicked(QTreeWidgetItem* item, int column);
+
+private:
+    void populateOutlineNode(QTreeWidgetItem* parentItem, const QJsonObject& symbol);
+    QString getSymbolPrefix(int kind) const;
+    QColor getSymbolColor(int kind) const;
+
+    QLineEdit* filterEdit;
+    QTreeWidget* treeWidget;
+    QLabel* placeholderLabel;
+};
+""")
+
+write(f"{ROOT}/src/ui/OutlineWidget.cpp", r"""#include "OutlineWidget.hpp"
+#include <QVBoxLayout>
+#include <QBrush>
+#include <QHeaderView>
+
+OutlineWidget::OutlineWidget(QWidget* parent) : QWidget(parent) {
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(4, 4, 4, 4);
+    mainLayout->setSpacing(6);
+
+    filterEdit = new QLineEdit(this);
+    filterEdit->setPlaceholderText("Filter symbols...");
+    filterEdit->setStyleSheet("QLineEdit { background-color: #1e1e1e; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 8px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                               "QLineEdit:focus { border-color: #61afef; }");
+
+    treeWidget = new QTreeWidget(this);
+    treeWidget->setHeaderHidden(true);
+    treeWidget->setColumnCount(1);
+    treeWidget->setStyleSheet("QTreeWidget { background-color: #21252b; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                              "QTreeWidget::item { padding: 4px; }"
+                              "QTreeWidget::item:hover { background-color: #2c313c; color: #ffffff; }"
+                              "QTreeWidget::item:selected { background-color: #3e4452; color: #ffffff; }");
+
+    placeholderLabel = new QLabel("Open a C++ file to see its outline hierarchy.", this);
+    placeholderLabel->setWordWrap(true);
+    placeholderLabel->setAlignment(Qt::AlignCenter);
+    placeholderLabel->setStyleSheet("QLabel { color: #5c6370; font-family: 'Segoe UI', Arial; font-size: 11px; padding: 20px; }");
+
+    mainLayout->addWidget(filterEdit);
+    mainLayout->addWidget(treeWidget);
+    mainLayout->addWidget(placeholderLabel);
+
+    treeWidget->hide();
+    placeholderLabel->show();
+
+    connect(filterEdit, &QLineEdit::textChanged, this, &OutlineWidget::onFilterChanged);
+    connect(treeWidget, &QTreeWidget::itemClicked, this, &OutlineWidget::onItemClicked);
+}
+
+void OutlineWidget::clearOutline() {
+    treeWidget->clear();
+    treeWidget->hide();
+    placeholderLabel->show();
+}
+
+void OutlineWidget::updateSymbols(const QJsonArray& symbols) {
+    treeWidget->clear();
+    if (symbols.isEmpty()) {
+        treeWidget->hide();
+        placeholderLabel->show();
+        return;
+    }
+
+    for (const auto& val : symbols) {
+        QJsonObject sym = val.toObject();
+        populateOutlineNode(nullptr, sym);
+    }
+
+    placeholderLabel->hide();
+    treeWidget->show();
+    
+    for (int i = 0; i < treeWidget->topLevelItemCount(); ++i) {
+        treeWidget->topLevelItem(i)->setExpanded(true);
+    }
+}
+
+void OutlineWidget::populateOutlineNode(QTreeWidgetItem* parentItem, const QJsonObject& symbol) {
+    QString name = symbol["name"].toString();
+    int kind = symbol["kind"].toInt();
+    
+    QJsonObject range = symbol["range"].toObject();
+    QJsonObject start = range["start"].toObject();
+    int line = start["line"].toInt();
+
+    QTreeWidgetItem* item = nullptr;
+    if (parentItem) {
+        item = new QTreeWidgetItem(parentItem);
+    } else {
+        item = new QTreeWidgetItem(treeWidget);
+    }
+
+    item->setText(0, getSymbolPrefix(kind) + name);
+    item->setForeground(0, QBrush(getSymbolColor(kind)));
+    item->setData(0, Qt::UserRole, line + 1);
+
+    if (symbol.contains("children") && symbol["children"].isArray()) {
+        QJsonArray children = symbol["children"].toArray();
+        for (const auto& chVal : children) {
+            populateOutlineNode(item, chVal.toObject());
+        }
+    }
+}
+
+QString OutlineWidget::getSymbolPrefix(int kind) const {
+    switch (kind) {
+        case 5: return "[C] ";
+        case 6: return "[M] ";
+        case 7: return "[P] ";
+        case 8: return "[F] ";
+        case 9: return "[Ctor] ";
+        case 10: return "[Dtor] ";
+        case 12: return "[F] ";
+        case 13: return "[V] ";
+        case 22: return "[E] ";
+        case 23: return "[EM] ";
+        case 24: return "[S] ";
+        default: return "";
+    }
+}
+
+QColor OutlineWidget::getSymbolColor(int kind) const {
+    switch (kind) {
+        case 5: return QColor("#98c379");
+        case 24: return QColor("#98c379");
+        case 6: return QColor("#61afef");
+        case 9: return QColor("#61afef");
+        case 10: return QColor("#61afef");
+        case 12: return QColor("#61afef");
+        case 8: return QColor("#d19a66");
+        case 13: return QColor("#d19a66");
+        case 22: return QColor("#e5c07b");
+        case 23: return QColor("#e5c07b");
+        default: return QColor("#abb2bf");
+    }
+}
+
+void OutlineWidget::onFilterChanged(const QString& text) {
+    std::function<bool(QTreeWidgetItem*)> filterNode = [&](QTreeWidgetItem* item) -> bool {
+        bool anyChildVisible = false;
+        for (int i = 0; i < item->childCount(); ++i) {
+            if (filterNode(item->child(i))) {
+                anyChildVisible = true;
+            }
+        }
+        bool matches = item->text(0).contains(text, Qt::CaseInsensitive);
+        bool visible = matches || anyChildVisible;
+        item->setHidden(!visible);
+        return visible;
+    };
+
+    for (int i = 0; i < treeWidget->topLevelItemCount(); ++i) {
+        filterNode(treeWidget->topLevelItem(i));
+    }
+}
+
+void OutlineWidget::onItemClicked(QTreeWidgetItem* item, int column) {
+    QVariant val = item->data(0, Qt::UserRole);
+    if (val.isValid()) {
+        emit lineNavigationRequested(val.toInt());
+    }
+}
+""")
+
+# ---------------------------------------------------------
+# Git Visual History and Conflict Resolver Subsystems
+# ---------------------------------------------------------
+write(f"{ROOT}/src/ui/GitHistoryWidget.hpp", r"""#pragma once
+#include <QWidget>
+#include <QTableWidget>
+#include <QProcess>
+#include <QStringList>
+#include <QStyledItemDelegate>
+
+struct CommitNode {
+    QString hash;
+    QStringList parents;
+    QString author;
+    QString message;
+    QString refDecorations;
+    int column;
+};
+
+class GitHistoryDelegate : public QStyledItemDelegate {
+    Q_OBJECT
+public:
+    explicit GitHistoryDelegate(const QList<CommitNode>& nodes, QObject* parent = nullptr);
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override;
+
+private:
+    const QList<CommitNode>& commitNodes;
+};
+
+class GitHistoryWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit GitHistoryWidget(QWidget* parent = nullptr);
+    void setRootPath(const QString& path);
+    void refreshHistory();
+
+private slots:
+    void onProcessFinished(int exitCode);
+
+private:
+    QString rootPath;
+    QTableWidget* tableWidget;
+    QProcess* gitProcess;
+    QList<CommitNode> commitNodes;
+};
+""")
+
+write(f"{ROOT}/src/ui/GitHistoryWidget.cpp", r"""#include "GitHistoryWidget.hpp"
+#include <QVBoxLayout>
+#include <QHeaderView>
+#include <QPainter>
+#include <QBrush>
+#include <QPen>
+#include <QMessageBox>
+
+GitHistoryDelegate::GitHistoryDelegate(const QList<CommitNode>& nodes, QObject* parent)
+    : QStyledItemDelegate(parent), commitNodes(nodes) {}
+
+void GitHistoryDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const {
+    if (index.column() != 0) {
+        QStyledItemDelegate::paint(painter, option, index);
+        return;
+    }
+
+    if (option.state & QStyle::State_Selected) {
+        painter->fillRect(option.rect, QColor("#2c313c"));
+    } else {
+        painter->fillRect(option.rect, QColor("#1e1e1e"));
+    }
+
+    int row = index.row();
+    if (row < 0 || row >= commitNodes.size()) return;
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing);
+
+    const auto& node = commitNodes[row];
+    int xCenter = option.rect.left() + 15 + node.column * 12;
+    int yCenter = option.rect.center().y();
+
+    QList<QColor> colors = { QColor("#61afef"), QColor("#98c379"), QColor("#d19a66"), QColor("#e5c07b"), QColor("#c678dd"), QColor("#56b6c2") };
+    QColor colColor = colors[node.column % colors.size()];
+
+    // Draw track line down
+    painter->setPen(QPen(colColor, 2));
+    painter->drawLine(xCenter, yCenter, xCenter, option.rect.bottom());
+
+    // Draw track line up
+    painter->drawLine(xCenter, option.rect.top(), xCenter, yCenter);
+
+    // Draw node circle
+    painter->setBrush(colColor);
+    painter->setPen(QPen(QColor("#ffffff"), 1));
+    painter->drawEllipse(QPoint(xCenter, yCenter), 4, 4);
+
+    painter->restore();
+}
+
+GitHistoryWidget::GitHistoryWidget(QWidget* parent)
+    : QWidget(parent), gitProcess(new QProcess(this))
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+
+    tableWidget = new QTableWidget(this);
+    tableWidget->setColumnCount(4);
+    tableWidget->setHorizontalHeaderLabels({"Graph", "Message", "Author", "Commit"});
+    tableWidget->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    tableWidget->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tableWidget->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    tableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    
+    tableWidget->setStyleSheet("QTableWidget { background-color: #1e1e1e; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                               "QHeaderView::section { background-color: #2c313c; color: #abb2bf; border: 1px solid #181a1f; padding: 4px; }");
+    tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
+    tableWidget->verticalHeader()->setVisible(false);
+
+    layout->addWidget(tableWidget);
+
+    connect(gitProcess, &QProcess::finished, this, &GitHistoryWidget::onProcessFinished);
+}
+
+void GitHistoryWidget::setRootPath(const QString& path) {
+    rootPath = path;
+    refreshHistory();
+}
+
+void GitHistoryWidget::refreshHistory() {
+    if (rootPath.isEmpty() || gitProcess->state() != QProcess::NotRunning) return;
+
+    gitProcess->setWorkingDirectory(rootPath);
+    gitProcess->start("git", QStringList() << "log" << "--pretty=format:%h|%p|%an|%s|%d" << "-n" << "50");
+}
+
+void GitHistoryWidget::onProcessFinished(int exitCode) {
+    if (exitCode != 0) {
+        tableWidget->setRowCount(0);
+        return;
+    }
+
+    QString out = gitProcess->readAllStandardOutput();
+    commitNodes.clear();
+
+    QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+    for (const QString& line : lines) {
+        QStringList parts = line.split('|');
+        if (parts.size() < 4) continue;
+        CommitNode node;
+        node.hash = parts[0].trimmed();
+        node.parents = parts[1].split(' ', Qt::SkipEmptyParts);
+        node.author = parts[2].trimmed();
+        node.message = parts[3].trimmed();
+        if (parts.size() > 4) {
+            node.refDecorations = parts[4].trimmed();
+        }
+        node.column = 0;
+        commitNodes.append(node);
+    }
+
+    // Assign tracks columns
+    QList<QString> activeTracks;
+    for (int i = 0; i < commitNodes.size(); ++i) {
+        QString h = commitNodes[i].hash;
+        int col = activeTracks.indexOf(h);
+        if (col == -1) {
+            col = activeTracks.size();
+            activeTracks.append(h);
+        }
+        commitNodes[i].column = col;
+
+        activeTracks.removeAt(col);
+        for (const QString& p : commitNodes[i].parents) {
+            if (activeTracks.indexOf(p) == -1) {
+                activeTracks.insert(col, p);
+            }
+        }
+    }
+
+    tableWidget->setRowCount(commitNodes.size());
+    tableWidget->setItemDelegate(new GitHistoryDelegate(commitNodes, this));
+
+    for (int i = 0; i < commitNodes.size(); ++i) {
+        const auto& node = commitNodes[i];
+        
+        auto* graphItem = new QTableWidgetItem();
+        tableWidget->setItem(i, 0, graphItem);
+
+        QString msg = node.message;
+        if (!node.refDecorations.isEmpty()) {
+            msg = node.refDecorations + " " + msg;
+        }
+        auto* msgItem = new QTableWidgetItem(msg);
+        tableWidget->setItem(i, 1, msgItem);
+
+        auto* authorItem = new QTableWidgetItem(node.author);
+        tableWidget->setItem(i, 2, authorItem);
+
+        auto* hashItem = new QTableWidgetItem(node.hash);
+        tableWidget->setItem(i, 3, hashItem);
+    }
+}
+""")
+
+write(f"{ROOT}/src/ui/GitConflictResolver.hpp", r"""#pragma once
+#include <QWidget>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QLabel>
+
+class GitConflictResolver : public QWidget {
+    Q_OBJECT
+public:
+    explicit GitConflictResolver(const QString& filePath, QWidget* parent = nullptr);
+    QString getFilePath() const { return filePath; }
+
+signals:
+    void resolved(const QString& path);
+
+private slots:
+    void acceptLocal();
+    void acceptRemote();
+    void acceptBoth();
+    void saveAndResolve();
+
+private:
+    bool parseConflictData();
+
+    QString filePath;
+    QString localContent;
+    QString remoteContent;
+    QString rawConflictContent;
+
+    QPlainTextEdit* leftEdit;
+    QPlainTextEdit* rightEdit;
+    QPlainTextEdit* centerEdit;
+    QLabel* titleLabel;
+};
+""")
+
+write(f"{ROOT}/src/ui/GitConflictResolver.cpp", r"""#include "GitConflictResolver.hpp"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
+#include <QFileInfo>
+#include <QProcess>
+
+GitConflictResolver::GitConflictResolver(const QString& path, QWidget* parent)
+    : QWidget(parent), filePath(path)
+{
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(8, 8, 8, 8);
+    mainLayout->setSpacing(8);
+
+    titleLabel = new QLabel(QString("Resolve Conflict: %1").arg(QFileInfo(path).fileName()), this);
+    titleLabel->setStyleSheet("QLabel { color: #e06c75; font-family: 'Segoe UI', Arial; font-size: 14px; font-weight: bold; }");
+    mainLayout->addWidget(titleLabel);
+
+    // Three pane layout
+    auto* paneLayout = new QHBoxLayout();
+    
+    // Left Pane (Local)
+    auto* leftLayout = new QVBoxLayout();
+    auto* leftLabel = new QLabel("Current Change (Local - HEAD)", this);
+    leftLabel->setStyleSheet("color: #61afef; font-weight: bold;");
+    leftEdit = new QPlainTextEdit(this);
+    leftEdit->setReadOnly(true);
+    leftEdit->setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #abb2bf; font-family: 'Consolas', monospace; }");
+    auto* acceptLocalBtn = new QPushButton("Accept Local Change", this);
+    acceptLocalBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #61afef; border: 1px solid #61afef; border-radius: 4px; padding: 6px; font-weight: bold; }"
+                                  "QPushButton:hover { background-color: #61afef; color: #1e1e1e; }");
+    leftLayout->addWidget(leftLabel);
+    leftLayout->addWidget(leftEdit);
+    leftLayout->addWidget(acceptLocalBtn);
+
+    // Center Pane (Merged Result)
+    auto* centerLayout = new QVBoxLayout();
+    auto* centerLabel = new QLabel("Merged Result (Editable)", this);
+    centerLabel->setStyleSheet("color: #98c379; font-weight: bold;");
+    centerEdit = new QPlainTextEdit(this);
+    centerEdit->setStyleSheet("QPlainTextEdit { background-color: #21252b; color: #ffffff; font-family: 'Consolas', monospace; border: 1px solid #3e4452; }");
+    auto* acceptBothBtn = new QPushButton("Accept Both (Local + Remote)", this);
+    acceptBothBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #98c379; border: 1px solid #98c379; border-radius: 4px; padding: 6px; font-weight: bold; }"
+                                  "QPushButton:hover { background-color: #98c379; color: #1e1e1e; }");
+    centerLayout->addWidget(centerLabel);
+    centerLayout->addWidget(centerEdit);
+    centerLayout->addWidget(acceptBothBtn);
+
+    // Right Pane (Remote)
+    auto* rightLayout = new QVBoxLayout();
+    auto* rightLabel = new QLabel("Incoming Change (Remote)", this);
+    rightLabel->setStyleSheet("color: #d19a66; font-weight: bold;");
+    rightEdit = new QPlainTextEdit(this);
+    rightEdit->setReadOnly(true);
+    rightEdit->setStyleSheet("QPlainTextEdit { background-color: #1e1e1e; color: #abb2bf; font-family: 'Consolas', monospace; }");
+    auto* acceptRemoteBtn = new QPushButton("Accept Remote Change", this);
+    acceptRemoteBtn->setStyleSheet("QPushButton { background-color: #2c313c; color: #d19a66; border: 1px solid #d19a66; border-radius: 4px; padding: 6px; font-weight: bold; }"
+                                   "QPushButton:hover { background-color: #d19a66; color: #1e1e1e; }");
+    rightLayout->addWidget(rightLabel);
+    rightLayout->addWidget(rightEdit);
+    rightLayout->addWidget(acceptRemoteBtn);
+
+    paneLayout->addLayout(leftLayout);
+    paneLayout->addLayout(centerLayout);
+    paneLayout->addLayout(rightLayout);
+    mainLayout->addLayout(paneLayout);
+
+    // Action button at the bottom
+    auto* saveBtn = new QPushButton("Save & Mark Resolved", this);
+    saveBtn->setStyleSheet("QPushButton { background-color: #98c379; color: #1e1e1e; border: none; border-radius: 4px; padding: 10px; font-weight: bold; font-size: 13px; }"
+                           "QPushButton:hover { background-color: #a6db87; }");
+    mainLayout->addWidget(saveBtn);
+
+    connect(acceptLocalBtn, &QPushButton::clicked, this, &GitConflictResolver::acceptLocal);
+    connect(acceptRemoteBtn, &QPushButton::clicked, this, &GitConflictResolver::acceptRemote);
+    connect(acceptBothBtn, &QPushButton::clicked, this, &GitConflictResolver::acceptBoth);
+    connect(saveBtn, &QPushButton::clicked, this, &GitConflictResolver::saveAndResolve);
+
+    parseConflictData();
+}
+
+bool GitConflictResolver::parseConflictData() {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+
+    QTextStream in(&file);
+    QStringList localLines;
+    QStringList remoteLines;
+    QStringList rawLines;
+
+    bool inConflict = false;
+    bool inRemote = false;
+
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        rawLines.append(line);
+
+        if (line.startsWith("<<<<<<<")) {
+            inConflict = true;
+            inRemote = false;
+            continue;
+        } else if (line.startsWith("=======")) {
+            inRemote = true;
+            continue;
+        } else if (line.startsWith(">>>>>>>")) {
+            inConflict = false;
+            inRemote = false;
+            continue;
+        }
+
+        if (inConflict) {
+            if (inRemote) {
+                remoteLines.append(line);
+            } else {
+                localLines.append(line);
+            }
+        } else {
+            localLines.append(line);
+            remoteLines.append(line);
+        }
+    }
+    file.close();
+
+    localContent = localLines.join('\n');
+    remoteContent = remoteLines.join('\n');
+    rawConflictContent = rawLines.join('\n');
+
+    leftEdit->setPlainText(localContent);
+    rightEdit->setPlainText(remoteContent);
+    centerEdit->setPlainText(rawConflictContent);
+    return true;
+}
+
+void GitConflictResolver::acceptLocal() {
+    centerEdit->setPlainText(localContent);
+}
+
+void GitConflictResolver::acceptRemote() {
+    centerEdit->setPlainText(remoteContent);
+}
+
+void GitConflictResolver::acceptBoth() {
+    centerEdit->setPlainText(localContent + "\n" + remoteContent);
+}
+
+void GitConflictResolver::saveAndResolve() {
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "Save Error", "Could not open file for writing.");
+        return;
+    }
+    QTextStream out(&file);
+    out << centerEdit->toPlainText();
+    file.close();
+
+    QProcess* gitAdd = new QProcess(this);
+    gitAdd->setWorkingDirectory(QFileInfo(filePath).absolutePath());
+    gitAdd->start("git", QStringList() << "add" << filePath);
+    gitAdd->waitForFinished(2000);
+    gitAdd->deleteLater();
+
+    emit resolved(filePath);
 }
 """)
 
@@ -5103,6 +6768,7 @@ write(f"{ROOT}/src/ui/EditorWindow.hpp", r"""#pragma once
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QStringListModel>
+#include "../ai/AIAction.hpp"
 
 class CustomEditor;
 class FileBrowser;
@@ -5113,6 +6779,9 @@ class AIPatchController;
 class CommandPalette;
 class ClipboardListener;
 class FindReplaceDialog;
+class OutlineWidget;
+class GitConflictResolver;
+class RemoteServerWidget;
 class QShowEvent;
 class QSplitter;
 class QListView;
@@ -5131,13 +6800,18 @@ class EditorWindow : public QMainWindow {
 public:
     explicit EditorWindow(QWidget *parent = nullptr);
     CustomEditor* currentEditor() const;
+    void openFileInTab(const QString& path);
+    void executeAIAction(const AIAction& action);
+    QString getActiveProgrammingDirectory() const;
+
+signals:
+    void buildCompleted(int exitCode, const QString& buildErrors);
 
 private:
     void createMenus();
     void createDocks();
     void createCentralEditor();
     void showEvent(QShowEvent* event) override;
-    void openFileInTab(const QString& path);
     void runBuild();
     void readBuildOutput();
     void buildFinished(int exitCode, int exitStatus);
@@ -5145,6 +6819,8 @@ private:
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
     void openSearchTab();
+    void openConflictResolver(const QString& filePath);
+    void openSshTerminal(const QString& host, const QString& port, const QString& user);
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
@@ -5175,9 +6851,14 @@ private:
     QStringListModel* historyModel;
     QString buildBuffer;
     FindReplaceDialog* findReplaceDialog;
+    OutlineWidget* outlineWidget;
+    RemoteServerWidget* serverWidget;
+    int lastOutlineRequestId;
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;
+    QComboBox* targetEnvCombo;
+    QString dockerImageName;
     QTableWidget* referencesTable;
 
     struct EditorDiagnostic {
@@ -5206,6 +6887,9 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include "WelcomeWidget.hpp"
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
+#include "OutlineWidget.hpp"
+#include "GitConflictResolver.hpp"
+#include "RemoteServerWidget.hpp"
 #include "GitWidget.hpp"
 #include "LspClient.hpp"
 #include <QComboBox>
@@ -5213,6 +6897,7 @@ write(f"{ROOT}/src/ui/EditorWindow.cpp", r"""#include "EditorWindow.hpp"
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QUrl>
+#include <QDesktopServices>
 #include <QIcon>
 #include <QPixmap>
 
@@ -5262,6 +6947,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       cmdLineEdit(nullptr),
       cmakeTargetCombo(nullptr),
       cmakeBuildTypeCombo(nullptr),
+      targetEnvCombo(nullptr),
+      dockerImageName("python:3.10-slim"),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this)),
       findReplaceDialog(nullptr)
@@ -5391,16 +7078,33 @@ void EditorWindow::createCentralEditor() {
         if (w) w->deleteLater();
     });
 
-    // Synchronize pathLineEdit with active tab changes
+    // Synchronize pathLineEdit and Outline view with active tab changes
     connect(tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
         if (index != -1) {
             auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(index));
             if (ed) {
-                pathLineEdit->setText(ed->currentFilePath());
-            } else if (qobject_cast<SearchWidget*>(tabWidget->widget(index))) {
-                pathLineEdit->setText("Workspace Search");
+                QString path = ed->currentFilePath();
+                pathLineEdit->setText(path);
+                if (outlineWidget) {
+                    if (!path.isEmpty()) {
+                        lastOutlineRequestId = LspClient::instance().requestDocumentSymbols(path);
+                    } else {
+                        outlineWidget->clearOutline();
+                    }
+                }
             } else {
-                pathLineEdit->setText("Welcome Page");
+                if (qobject_cast<SearchWidget*>(tabWidget->widget(index))) {
+                    pathLineEdit->setText("Workspace Search");
+                } else {
+                    pathLineEdit->setText("Welcome Page");
+                }
+                if (outlineWidget) {
+                    outlineWidget->clearOutline();
+                }
+            }
+        } else {
+            if (outlineWidget) {
+                outlineWidget->clearOutline();
             }
         }
     });
@@ -5479,12 +7183,34 @@ void EditorWindow::createCentralEditor() {
                                     "QComboBox::drop-down { border: none; }"
                                     "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
 
+    targetEnvCombo = new QComboBox(this);
+    targetEnvCombo->addItems(QStringList() << "Local Host" << "WSL (Ubuntu)" << "Docker Container");
+    targetEnvCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                  "QComboBox::drop-down { border: none; }"
+                                  "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    connect(targetEnvCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (targetEnvCombo->currentText() == "Docker Container") {
+            bool ok = false;
+            QString img = QInputDialog::getText(this, "Docker Image Settings",
+                                                "Specify Docker image name to run compilation inside:",
+                                                QLineEdit::Normal, dockerImageName, &ok);
+            if (ok && !img.trimmed().isEmpty()) {
+                dockerImageName = img.trimmed();
+            }
+        }
+    });
+
     if (statusBar()) {
+        auto* envLabel = new QLabel("  Env: ", this);
+        envLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         auto* buildLabel = new QLabel("  Config: ", this);
         buildLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         auto* targetLabel = new QLabel("  Target: ", this);
         targetLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         
+        statusBar()->addPermanentWidget(envLabel);
+        statusBar()->addPermanentWidget(targetEnvCombo);
         statusBar()->addPermanentWidget(buildLabel);
         statusBar()->addPermanentWidget(cmakeBuildTypeCombo);
         statusBar()->addPermanentWidget(targetLabel);
@@ -5514,6 +7240,18 @@ void EditorWindow::createCentralEditor() {
 }
 
 void EditorWindow::openFileInTab(const QString& path) {
+    if (!path.isEmpty()) {
+        QString targetAbs = QFileInfo(path).absoluteFilePath();
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i));
+            if (ed && QFileInfo(ed->currentFilePath()).absoluteFilePath() == targetAbs) {
+                tabWidget->setCurrentIndex(i);
+                if (pathLineEdit) pathLineEdit->setText(path);
+                return;
+            }
+        }
+    }
+
     auto* newEditor = new CustomEditor(this);
     if (!path.isEmpty()) newEditor->openFile(path);
     
@@ -5522,6 +7260,12 @@ void EditorWindow::openFileInTab(const QString& path) {
         if (idx != -1) {
             tabWidget->removeTab(idx);
             newEditor->deleteLater();
+        }
+    });
+
+    connect(newEditor, &CustomEditor::fileSaved, this, [this](const QString& path) {
+        if (outlineWidget && !path.isEmpty()) {
+            lastOutlineRequestId = LspClient::instance().requestDocumentSymbols(path);
         }
     });
 
@@ -5578,6 +7322,41 @@ void EditorWindow::openSearchTab() {
         int idx = tabWidget->addTab(sWidget, "Workspace Search");
         tabWidget->setCurrentIndex(idx);
     }
+}
+
+void EditorWindow::openConflictResolver(const QString& filePath) {
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        auto* resolver = qobject_cast<GitConflictResolver*>(tabWidget->widget(i));
+        if (resolver && resolver->getFilePath() == filePath) {
+            tabWidget->setCurrentIndex(i);
+            return;
+        }
+    }
+
+    auto* resolver = new GitConflictResolver(filePath, this);
+    connect(resolver, &GitConflictResolver::resolved, this, [this, resolver](const QString& path) {
+        int idx = tabWidget->indexOf(resolver);
+        if (idx != -1) {
+            tabWidget->removeTab(idx);
+            resolver->deleteLater();
+        }
+        if (gitWidget) gitWidget->refreshStatus();
+        QMessageBox::information(this, "Conflict Resolved", "The file has been successfully merged and staged.");
+    });
+
+    int idx = tabWidget->addTab(resolver, "Resolve: " + QFileInfo(filePath).fileName());
+    tabWidget->setCurrentIndex(idx);
+}
+
+void EditorWindow::openSshTerminal(const QString& host, const QString& port, const QString& user) {
+    if (!bottomTabWidget) return;
+
+    QStringList args;
+    args << QString("%1@%2").arg(user).arg(host) << "-p" << port;
+
+    auto* sshTab = new TerminalWidget("ssh.exe", args, this);
+    int idx = bottomTabWidget->addTab(sshTab, QString("SSH: %1").arg(host));
+    bottomTabWidget->setCurrentIndex(idx);
 }
 
 void EditorWindow::showCommandPalette() {
@@ -5680,12 +7459,31 @@ void EditorWindow::createDocks() {
 
     fileBrowser = new FileBrowser(leftTabs);
     gitWidget = new GitWidget(leftTabs);
+    outlineWidget = new OutlineWidget(leftTabs);
+    serverWidget = new RemoteServerWidget(leftTabs);
 
     leftTabs->addTab(fileBrowser, "Files");
     leftTabs->addTab(gitWidget, "Git");
+    leftTabs->addTab(outlineWidget, "Outline");
+    leftTabs->addTab(serverWidget, "Servers");
+
+    connect(gitWidget, &GitWidget::conflictResolutionRequested, this, &EditorWindow::openConflictResolver);
+    connect(serverWidget, &RemoteServerWidget::openSshRequested, this, &EditorWindow::openSshTerminal);
  
     fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
+
+    connect(outlineWidget, &OutlineWidget::lineNavigationRequested, this, [this](int line) {
+        if (auto* ed = currentEditor()) {
+            gotoLine(ed->currentFilePath(), line);
+        }
+    });
+
+    connect(&LspClient::instance(), &LspClient::documentSymbolsReady, this, [this](int id, const QJsonArray& symbols) {
+        if (id == lastOutlineRequestId && outlineWidget) {
+            outlineWidget->updateSymbols(symbols);
+        }
+    });
  
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
         openFileInTab(path);
@@ -5729,20 +7527,19 @@ void EditorWindow::createDocks() {
     aiDock->setWidget(aiPanel);
     addDockWidget(Qt::RightDockWidgetArea, aiDock);
 
-    // Connect AI Chat signals to the Central Editor
-    connect(aiPanel, &AIChatPanel::applyToEditor, this, [this](const QString& code) {
+    // Connect AI Chat signals
+    connect(aiPanel, &AIChatPanel::requestActiveFileContext, this, [this](QString& filePath, QString& fileContent, QString& baseDir) {
+        baseDir = getActiveProgrammingDirectory();
         if (auto* ed = currentEditor()) {
-            auto* textEdit = ed->findChild<QPlainTextEdit*>();
-            if (textEdit) textEdit->setPlainText(code);
+            filePath = ed->currentFilePath();
+            if (auto* codeEd = ed->getCodeEditor()) {
+                fileContent = codeEd->toPlainText();
+            }
         }
     });
 
-    connect(aiPanel, &AIChatPanel::createNewFile, this, [this](const QString& code) {
-        openFileInTab("");
-        if (auto* ed = currentEditor()) {
-            auto* textEdit = ed->findChild<QPlainTextEdit*>();
-            if (textEdit) textEdit->setPlainText(code);
-        }
+    connect(aiPanel, &AIChatPanel::executeAction, this, [this](const AIAction& action) {
+        executeAIAction(action);
     });
 
     connect(aiPanel, &AIChatPanel::promptArchived, this, [this](const QString& summary) {
@@ -5750,6 +7547,9 @@ void EditorWindow::createDocks() {
         list.prepend(summary);
         historyModel->setStringList(list);
     });
+
+    connect(aiPanel, &AIChatPanel::requestBuildRun, this, &EditorWindow::runBuild);
+    connect(this, &EditorWindow::buildCompleted, aiPanel, &AIChatPanel::handleBuildFinished);
 
     aiPatchController = new AIPatchController(nullptr, this);
 }
@@ -5814,6 +7614,27 @@ void EditorWindow::createMenus() {
     });
 
     auto *editMenu = menuBar()->addMenu("&Edit");
+
+    auto *undoAction = editMenu->addAction("Undo", [this]() {
+        if (auto* ed = currentEditor()) {
+            if (auto* codeEd = ed->getCodeEditor()) {
+                codeEd->undo();
+            }
+        }
+    });
+    undoAction->setShortcut(QKeySequence::Undo);
+
+    auto *redoAction = editMenu->addAction("Redo", [this]() {
+        if (auto* ed = currentEditor()) {
+            if (auto* codeEd = ed->getCodeEditor()) {
+                codeEd->redo();
+            }
+        }
+    });
+    redoAction->setShortcut(QKeySequence::Redo);
+
+    editMenu->addSeparator();
+
     auto *findAction = editMenu->addAction("Find & Replace...", [this]() {
         if (!findReplaceDialog) {
             findReplaceDialog = new FindReplaceDialog(this);
@@ -5899,8 +7720,23 @@ void EditorWindow::runBuild() {
     
     buildProcess->setWorkingDirectory(QDir::currentPath());
 
+    QString program = "python";
     QStringList args;
-    args << "build.py";
+
+    QString env = targetEnvCombo ? targetEnvCombo->currentText() : "Local Host";
+
+    if (env == "WSL (Ubuntu)") {
+        program = "wsl.exe";
+        args << "python3" << "build.py";
+    } else if (env == "Docker Container") {
+        program = "docker.exe";
+        QString currentPath = QDir::currentPath();
+        args << "run" << "--rm" << "-v" << QString("%1:/workspace").arg(currentPath) << "-w" << "/workspace" << dockerImageName << "python3" << "build.py";
+    } else {
+        program = "python";
+        args << "build.py";
+    }
+
     if (cmakeBuildTypeCombo) {
         args << "--build-type" << cmakeBuildTypeCombo->currentText();
     }
@@ -5910,7 +7746,7 @@ void EditorWindow::runBuild() {
             args << "--target" << tgt;
         }
     }
-    buildProcess->start("python", args);
+    buildProcess->start(program, args);
 }
 
 void EditorWindow::readBuildOutput() {
@@ -5952,6 +7788,14 @@ void EditorWindow::buildFinished(int exitCode, int exitStatus) {
             statusBar()->showMessage("Build Failed (Exit Code: " + QString::number(exitCode) + ")", 5000);
         }
     }
+
+    QString buildErrors = "";
+    for (const auto& diag : activeDiagnostics) {
+        if (diag.isError) {
+            buildErrors += QString("%1:%2 - %3\n").arg(diag.file).arg(diag.line).arg(diag.message);
+        }
+    }
+    emit buildCompleted(exitCode, buildErrors);
 }
 
 void EditorWindow::parseBuildLine(const QString& line) {
@@ -6085,6 +7929,131 @@ void EditorWindow::fixProblemWithAI(const QString& filePath, int line, const QSt
 
     aiPatchController->setEditor(currentEditor());
     aiPatchController->requestRefactor(prompt);
+}
+
+QString EditorWindow::getActiveProgrammingDirectory() const {
+    if (fileBrowser && !fileBrowser->rootPath().isEmpty()) {
+        return fileBrowser->rootPath();
+    }
+    if (auto* ed = currentEditor()) {
+        QString filePath = ed->currentFilePath();
+        if (!filePath.isEmpty()) {
+            return QFileInfo(filePath).absolutePath();
+        }
+    }
+    return QDir::currentPath();
+}
+
+void EditorWindow::executeAIAction(const AIAction& action) {
+    QString baseDir = getActiveProgrammingDirectory();
+
+    if (action.type == "create_file") {
+        QString targetPath = action.path;
+        if (targetPath.isEmpty()) targetPath = "untitled_file.cpp";
+        
+        QString absPath = QFileInfo(targetPath).isAbsolute()
+            ? targetPath
+            : QDir(baseDir).absoluteFilePath(targetPath);
+        QDir().mkpath(QFileInfo(absPath).path());
+        
+        QFile file(absPath);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&file);
+            out << action.content;
+            file.close();
+            openFileInTab(absPath);
+        } else {
+            QMessageBox::warning(this, "AI Actions", QString("Failed to create file: %1").arg(targetPath));
+        }
+    }
+    else if (action.type == "modify_file") {
+        if (action.path.isEmpty()) return;
+        QString absPath = QFileInfo(action.path).isAbsolute()
+            ? action.path
+            : QDir(baseDir).absoluteFilePath(action.path);
+        
+        QString originalContent = "";
+        QFile fileRead(absPath);
+        if (fileRead.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            originalContent = QTextStream(&fileRead).readAll();
+            fileRead.close();
+        }
+
+        bool success = true;
+        QString errorMsg = "";
+        QString modifiedContent = AIChatPanel::applySearchReplace(originalContent, action.content, success, errorMsg);
+
+        if (!success) {
+            QMessageBox::critical(this, "AI Actions Error", QString("Failed to apply actions to file: %1\n%2").arg(action.path).arg(errorMsg));
+            return;
+        }
+
+        QDir().mkpath(QFileInfo(absPath).path());
+        QFile fileWrite(absPath);
+        if (fileWrite.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&fileWrite);
+            out << modifiedContent;
+            fileWrite.close();
+        } else {
+            QMessageBox::warning(this, "AI Actions", QString("Failed to write to file: %1").arg(action.path));
+            return;
+        }
+
+        openFileInTab(absPath);
+        if (auto* ed = currentEditor()) {
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) {
+                codeEd->setPlainText(modifiedContent);
+            }
+        }
+    }
+    else if (action.type == "modify_current_editor") {
+        if (auto* ed = currentEditor()) {
+            QString originalContent = "";
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) originalContent = codeEd->toPlainText();
+
+            bool success = true;
+            QString errorMsg = "";
+            QString modifiedContent = AIChatPanel::applySearchReplace(originalContent, action.content, success, errorMsg);
+
+            if (!success) {
+                QMessageBox::critical(this, "AI Actions Error", QString("Failed to apply actions to active editor.\n%1").arg(errorMsg));
+                return;
+            }
+
+            QString absPath = ed->currentFilePath();
+            if (!absPath.isEmpty()) {
+                QFile file(absPath);
+                if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    QTextStream out(&file);
+                    out << modifiedContent;
+                    file.close();
+                }
+            }
+            if (codeEd) {
+                codeEd->setPlainText(modifiedContent);
+            }
+        } else {
+            openFileInTab("");
+            if (auto* ed = currentEditor()) {
+                auto* codeEd = ed->getCodeEditor();
+                if (codeEd) {
+                    codeEd->setPlainText(action.content);
+                }
+            }
+        }
+    }
+    else if (action.type == "insert_at_cursor") {
+        if (auto* ed = currentEditor()) {
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) {
+                codeEd->insertPlainText(action.content);
+            }
+        } else {
+            QMessageBox::warning(this, "AI Actions", "No active editor to insert code at cursor.");
+        }
+    }
 }
 """)
 

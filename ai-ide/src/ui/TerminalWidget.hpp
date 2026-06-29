@@ -9,6 +9,7 @@ class TerminalPane : public QWidget {
     Q_OBJECT
 public:
     explicit TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit = nullptr, QProcess* existingProc = nullptr, QWidget* parent = nullptr);
+    explicit TerminalPane(const QString& shellPath, const QStringList& shellArgs, QPlainTextEdit* existingEdit = nullptr, QProcess* existingProc = nullptr, QWidget* parent = nullptr);
     ~TerminalPane() override;
 
 signals:
@@ -29,6 +30,7 @@ private:
     QString ansiToHtml(const QString& ansiText);
 
     QString shell;
+    QStringList shellArgs;
     QPlainTextEdit* terminalEdit;
     QProcess* process;
     QWidget* toolbar;
@@ -45,6 +47,7 @@ class TerminalWidget : public QWidget {
     Q_OBJECT
 public:
     explicit TerminalWidget(const QString& shellPath, QWidget* parent = nullptr);
+    explicit TerminalWidget(const QString& shellPath, const QStringList& shellArgs, QWidget* parent = nullptr);
 private:
     TerminalPane* rootPane;
 };

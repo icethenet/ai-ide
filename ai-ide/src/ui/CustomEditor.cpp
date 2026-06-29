@@ -9,6 +9,9 @@
 #include <QTextStream>
 #include <QFileDialog>
 #include <QDir>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTextBlock>
@@ -19,7 +22,7 @@
 #include <QMainWindow>
 
 CustomEditor::CustomEditor(QWidget* parent)
-    : QWidget(parent), closeButton(nullptr), saveAsButton(nullptr), highlighter(nullptr)
+    : QWidget(parent), saveButton(nullptr), saveAsButton(nullptr), closeButton(nullptr), openHtmlButton(nullptr), highlighter(nullptr)
 {
     auto* mainLayout = new QVBoxLayout(this);
 
@@ -31,15 +34,51 @@ CustomEditor::CustomEditor(QWidget* parent)
     auto* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch();
     
+    saveButton = new QPushButton("Save", this);
+    saveButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                           "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+
     saveAsButton = new QPushButton("Save As", this);
+    saveAsButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                             "QPushButton:hover { background-color: #3e4452; color: #ffffff; }");
+
     closeButton = new QPushButton("Close", this);
+    closeButton->setStyleSheet("QPushButton { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                            "QPushButton:hover { background-color: #e06c75; color: #ffffff; border-color: #d15a63; }");
+
+    openHtmlButton = new QPushButton("Open HTML", this);
+    openHtmlButton->setStyleSheet("QPushButton { background-color: #98c379; color: #1e1e1e; border: 1px solid #7cb057; border-radius: 4px; padding: 4px 12px; font-family: 'Segoe UI', Arial; font-size: 11px; font-weight: bold; }"
+                               "QPushButton:hover { background-color: #a6db87; color: #111111; }");
     
+    buttonLayout->addWidget(saveButton);
     buttonLayout->addWidget(saveAsButton);
     buttonLayout->addWidget(closeButton);
+    buttonLayout->addWidget(openHtmlButton);
     mainLayout->addLayout(buttonLayout);
 
-    connect(closeButton, &QPushButton::clicked, this, &CustomEditor::closeRequested);
+    connect(saveButton, &QPushButton::clicked, this, &CustomEditor::saveFile);
     connect(saveAsButton, &QPushButton::clicked, this, &CustomEditor::saveAsFile);
+    connect(closeButton, &QPushButton::clicked, this, &CustomEditor::closeRequested);
+
+    connect(openHtmlButton, &QPushButton::clicked, this, [this]() {
+        QString path = currentFilePath();
+        if (path.endsWith(".html", Qt::CaseSensitivity::CaseInsensitive) || path.endsWith(".htm", Qt::CaseSensitivity::CaseInsensitive)) {
+            saveFile();
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        } else {
+            QString baseDir = path.isEmpty() ? QDir::currentPath() : QFileInfo(path).absolutePath();
+            QString tempPath = QDir(baseDir).absoluteFilePath("preview_temp.html");
+            QFile file(tempPath);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&file);
+                out << editor->toPlainText();
+                file.close();
+                QDesktopServices::openUrl(QUrl::fromLocalFile(tempPath));
+            } else {
+                QMessageBox::warning(this, "Open HTML", "Please save the file first.");
+            }
+        }
+    });
 
     connect(editor, &QPlainTextEdit::textChanged, this, [this]() {
         if (!filePath.isEmpty()) {
@@ -73,6 +112,8 @@ void CustomEditor::saveFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    f.close();
+    emit fileSaved(filePath);
 }
 
 void CustomEditor::saveAsFile() {
@@ -92,7 +133,9 @@ void CustomEditor::saveAsFile() {
     }
     QTextStream out(&f);
     out << editor->toPlainText();
+    f.close();
     editor->setFilePath(fileName);
+    emit fileSaved(filePath);
 }
 
 QString CustomEditor::currentFilePath() const {

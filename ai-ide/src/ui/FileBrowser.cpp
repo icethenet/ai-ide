@@ -286,7 +286,6 @@ void FileBrowser::deleteItem() {
     } else {
         success = QFile::remove(path);
     }
-
     if (success) {
         refreshView();
     } else {

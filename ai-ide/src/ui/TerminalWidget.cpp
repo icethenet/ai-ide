@@ -7,8 +7,14 @@
 #include <QLabel>
 
 TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdit, QProcess* existingProc, QWidget* parent)
+    : TerminalPane(shellPath, QStringList(), existingEdit, existingProc, parent)
+{
+}
+
+TerminalPane::TerminalPane(const QString& shellPath, const QStringList& shellArgs, QPlainTextEdit* existingEdit, QProcess* existingProc, QWidget* parent)
     : QWidget(parent),
       shell(shellPath),
+      shellArgs(shellArgs),
       terminalEdit(existingEdit),
       process(existingProc),
       isSplit(false),
@@ -26,7 +32,11 @@ TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdi
     auto* toolbarLayout = new QHBoxLayout(toolbar);
     toolbarLayout->setContentsMargins(10, 2, 10, 2);
     
-    QString label = shellPath.contains("powershell") ? "PowerShell" : "Bash";
+    QString label = "Terminal";
+    if (shellPath.contains("powershell")) label = "PowerShell";
+    else if (shellPath.contains("bash")) label = "Bash";
+    else if (shellPath.contains("ssh")) label = "SSH Connection";
+    
     auto* shellLabel = new QLabel(label, this);
     shellLabel->setStyleSheet("QLabel { color: #abb2bf; font-weight: bold; font-family: 'Segoe UI', Arial; }");
     toolbarLayout->addWidget(shellLabel);
@@ -79,8 +89,8 @@ TerminalPane::TerminalPane(const QString& shellPath, QPlainTextEdit* existingEdi
         
         terminalEdit->installEventFilter(this);
 
-        QStringList args;
-        if (shellPath.contains("bash.exe")) {
+        QStringList args = shellArgs;
+        if (args.isEmpty() && shellPath.contains("bash.exe")) {
             args << "--login" << "-i";
         }
         process->start(shellPath, args);
@@ -343,10 +353,15 @@ QString TerminalPane::ansiToHtml(const QString& ansiText) {
 }
 
 TerminalWidget::TerminalWidget(const QString& shellPath, QWidget* parent)
+    : TerminalWidget(shellPath, QStringList(), parent)
+{
+}
+
+TerminalWidget::TerminalWidget(const QString& shellPath, const QStringList& shellArgs, QWidget* parent)
     : QWidget(parent)
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    rootPane = new TerminalPane(shellPath, nullptr, nullptr, this);
+    rootPane = new TerminalPane(shellPath, shellArgs, nullptr, nullptr, this);
     layout->addWidget(rootPane);
 }

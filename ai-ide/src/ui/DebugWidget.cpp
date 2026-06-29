@@ -13,6 +13,11 @@
 #include <QFile>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QRadialGradient>
+#include <QtMath>
+#include <cmath>
 
 DebugWidget::DebugWidget(QWidget* parent)
     : QWidget(parent),
@@ -70,13 +75,30 @@ DebugWidget::DebugWidget(QWidget* parent)
 
     splitter->addWidget(consoleContainer);
 
-    // Right container: Variables tree widget
-    variablesTree = new QTreeWidget(this);
+    // Right container: Variables tree widget and Visual Inspector
+    auto* rightContainer = new QWidget(this);
+    auto* rightLayout = new QVBoxLayout(rightContainer);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(0);
+
+    auto* rightSplitter = new QSplitter(Qt::Vertical, rightContainer);
+
+    variablesTree = new QTreeWidget(rightContainer);
     variablesTree->setColumnCount(3);
     variablesTree->setHeaderLabels({"Name", "Type", "Value"});
     variablesTree->header()->setSectionResizeMode(QHeaderView::Stretch);
-    variablesTree->setStyleSheet("QTreeWidget { background-color: #1e1e1e; color: #d4d4d4; } QHeaderView::section { background-color: #2d2d2d; color: #ffffff; }");
-    splitter->addWidget(variablesTree);
+    variablesTree->setStyleSheet("QTreeWidget { background-color: #21252b; color: #abb2bf; border: none; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                  "QHeaderView::section { background-color: #2c313c; color: #abb2bf; border: 1px solid #181a1f; padding: 4px; }");
+
+    visualInspector = new VisualInspectorWidget(rightContainer);
+
+    rightSplitter->addWidget(variablesTree);
+    rightSplitter->addWidget(visualInspector);
+    rightSplitter->setStretchFactor(0, 1);
+    rightSplitter->setStretchFactor(1, 1);
+
+    rightLayout->addWidget(rightSplitter);
+    splitter->addWidget(rightContainer);
 
     mainLayout->addWidget(splitter);
 
@@ -87,6 +109,12 @@ DebugWidget::DebugWidget(QWidget* parent)
     connect(stepIntoBtn, &QPushButton::clicked, this, &DebugWidget::stepInto);
     connect(continueBtn, &QPushButton::clicked, this, &DebugWidget::continueDebug);
     connect(cmdInput, &QLineEdit::returnPressed, this, &DebugWidget::sendManualCommand);
+    
+    connect(variablesTree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
+        if (item && visualInspector) {
+            visualInspector->inspectVariable(item->text(0), item->text(1), item->text(2));
+        }
+    });
 }
 
 DebugWidget::~DebugWidget() {
@@ -297,22 +325,24 @@ void DebugWidget::updateVariables() {
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
+            addVariable("my_array", "std::vector<int>", "[12, 45, 78, 34, 89, 56]");
+            addVariable("my_matrix", "int[3][3]", "[[10, 20, 30], [40, 50, 60], [70, 80, 90]]");
         } else if (simStepCount == 2) {
             addVariable("argc", "int", "1");
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
-            addVariable("loopCount", "int", "0");
+            addVariable("my_array", "std::vector<int>", "[18, 55, 78, 22, 99, 44]");
+            addVariable("my_matrix", "int[3][3]", "[[15, 25, 35], [45, 55, 65], [75, 85, 95]]");
+            addVariable("my_graph", "Graph", "{\"nodes\": [1, 2, 3, 4], \"edges\": [[1, 2], [2, 3], [3, 4], [4, 1]]}");
         } else {
             addVariable("argc", "int", "1");
             addVariable("argv", "char**", "0x0000021a8d052a60");
             addVariable("app", "QApplication", "{...}");
             addVariable("isInitialized", "bool", "true");
-            addVariable("w", "EditorWindow", "{...}");
-            addVariable("loopCount", "int", QString::number(simStepCount - 2));
-            addVariable("status", "QString", "\"Processing window event loop...\"");
+            addVariable("my_array", "std::vector<int>", QString("[%1, 40, 60, 80, 100, 20]").arg(simStepCount * 10));
+            addVariable("my_matrix", "int[3][3]", QString("[[%1, 20, 30], [40, %1, 60], [70, 80, %1]]").arg(simStepCount * 5));
+            addVariable("my_graph", "Graph", QString("{\"nodes\": [1, 2, 3, 4, 5], \"edges\": [[1, 2], [2, 3], [3, 4], [4, 5], [5, %1]]}").arg((simStepCount % 2 == 0) ? "1" : "3"));
         }
     }
 }
@@ -332,4 +362,231 @@ void DebugWidget::runSimulationStep() {
     }
     
     updateVariables();
+}
+
+VisualInspectorWidget::VisualInspectorWidget(QWidget* parent)
+    : QWidget(parent), visType(VisNone)
+{
+    setMinimumHeight(180);
+}
+
+void VisualInspectorWidget::inspectVariable(const QString& name, const QString& type, const QString& val) {
+    varName = name;
+    varType = type;
+    varVal = val;
+    
+    arrayData.clear();
+    matrixData.clear();
+    graphNodes.clear();
+    graphEdges.clear();
+    visType = VisNone;
+
+    QString cleanVal = val.trimmed();
+    
+    // Parse Graph
+    if (cleanVal.contains("nodes") && cleanVal.contains("edges")) {
+        visType = VisGraph;
+        QRegularExpression nodeRegex(R"("nodes"\s*:\s*\[([0-9,\s]*)\])");
+        auto nodeMatch = nodeRegex.match(cleanVal);
+        if (nodeMatch.hasMatch()) {
+            QStringList ns = nodeMatch.captured(1).split(',');
+            for (const QString& n : ns) {
+                QString trimmed = n.trimmed();
+                if (!trimmed.isEmpty()) graphNodes.push_back(trimmed.toInt());
+            }
+        }
+        QRegularExpression edgeRegex(R"("edges"\s*:\s*\[\s*(\[[0-9,\s,]*\]\s*,?\s*)*\s*\])");
+        QRegularExpression pairRegex(R"(\[\s*(\d+)\s*,\s*(\d+)\s*\])");
+        auto pairIt = pairRegex.globalMatch(cleanVal);
+        while (pairIt.hasNext()) {
+            auto pairMatch = pairIt.next();
+            int u = pairMatch.captured(1).toInt();
+            int v = pairMatch.captured(2).toInt();
+            graphEdges.push_back({u, v});
+        }
+    }
+    // Parse Matrix
+    else if (cleanVal.startsWith("[[") || cleanVal.startsWith("{{")) {
+        visType = VisMatrix;
+        QRegularExpression rowRegex(R"(\[([0-9,\s.-]+)\])");
+        if (cleanVal.startsWith("{")) {
+            rowRegex = QRegularExpression(R"(\{([0-9,\s.-]+)\})");
+        }
+        auto rowIt = rowRegex.globalMatch(cleanVal);
+        while (rowIt.hasNext()) {
+            auto rowMatch = rowIt.next();
+            QStringList cols = rowMatch.captured(1).split(',');
+            std::vector<double> rowData;
+            for (const QString& c : cols) {
+                QString trimmed = c.trimmed();
+                if (!trimmed.isEmpty()) rowData.push_back(trimmed.toDouble());
+            }
+            if (!rowData.empty()) {
+                matrixData.push_back(rowData);
+            }
+        }
+    }
+    // Parse Array
+    else if (cleanVal.startsWith("[") || cleanVal.startsWith("{")) {
+        visType = VisArray;
+        QString inner = cleanVal;
+        if (inner.startsWith("[")) {
+            inner = inner.mid(1, inner.length() - 2);
+        } else {
+            inner = inner.mid(1, inner.length() - 2);
+        }
+        QStringList items = inner.split(',');
+        for (const QString& item : items) {
+            QString trimmed = item.trimmed();
+            if (!trimmed.isEmpty()) {
+                arrayData.push_back(trimmed.toDouble());
+            }
+        }
+    }
+    
+    update();
+}
+
+void VisualInspectorWidget::paintEvent(QPaintEvent* event) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    painter.fillRect(rect(), QColor("#1e1e1e"));
+
+    if (visType == VisNone || (arrayData.empty() && matrixData.empty() && graphNodes.empty())) {
+        painter.setPen(QColor("#5c6370"));
+        painter.setFont(QFont("Segoe UI", 10));
+        painter.drawText(rect(), Qt::AlignCenter, "Select a collection variable (array, matrix, or graph)\nin the variables pane to view graphical visualization.");
+        return;
+    }
+
+    painter.setPen(QColor("#abb2bf"));
+    painter.setFont(QFont("Segoe UI", 9, QFont::Bold));
+    painter.drawText(QRect(10, 10, width() - 20, 20), Qt::AlignLeft | Qt::AlignVCenter, QString("Visualizing: %1 (%2)").arg(varName).arg(varType));
+
+    int contentY = 35;
+    int contentHeight = height() - contentY - 15;
+    int contentWidth = width() - 30;
+    int contentX = 15;
+
+    if (visType == VisArray) {
+        int numElements = arrayData.size();
+        double maxVal = 1e-5;
+        for (double val : arrayData) {
+            if (qAbs(val) > maxVal) maxVal = qAbs(val);
+        }
+
+        int barSpacing = 6;
+        int totalSpacing = barSpacing * (numElements - 1);
+        int barWidth = (contentWidth - totalSpacing) / numElements;
+        if (barWidth < 4) barWidth = 4;
+
+        for (int i = 0; i < numElements; ++i) {
+            double val = arrayData[i];
+            int barHeight = static_cast<int>((qAbs(val) / maxVal) * (contentHeight - 20));
+            int x = contentX + i * (barWidth + barSpacing);
+            int y = contentY + contentHeight - barHeight;
+
+            QLinearGradient gradient(x, y, x, y + barHeight);
+            gradient.setColorAt(0.0, QColor("#61afef"));
+            gradient.setColorAt(1.0, QColor("#4db5ff"));
+            
+            painter.setBrush(gradient);
+            painter.setPen(QColor("#3e4452"));
+            painter.drawRect(x, y, barWidth, barHeight);
+
+            painter.setPen(QColor("#abb2bf"));
+            painter.setFont(QFont("Segoe UI", 8));
+            QString valStr = QString::number(val);
+            painter.drawText(QRect(x - 10, y - 18, barWidth + 20, 15), Qt::AlignCenter, valStr);
+        }
+    }
+    else if (visType == VisMatrix) {
+        int rows = matrixData.size();
+        int cols = 0;
+        double maxVal = 1e-5;
+        for (const auto& r : matrixData) {
+            if (static_cast<int>(r.size()) > cols) cols = r.size();
+            for (double val : r) {
+                if (qAbs(val) > maxVal) maxVal = qAbs(val);
+            }
+        }
+
+        if (rows > 0 && cols > 0) {
+            int cellSizeX = contentWidth / cols;
+            int cellSizeY = contentHeight / rows;
+            int cellSize = qMin(cellSizeX, cellSizeY);
+            if (cellSize < 10) cellSize = 10;
+
+            int startX = contentX + (contentWidth - cellSize * cols) / 2;
+            int startY = contentY + (contentHeight - cellSize * rows) / 2;
+
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < static_cast<int>(matrixData[r].size()); ++c) {
+                    double val = matrixData[r][c];
+                    double ratio = qAbs(val) / maxVal;
+
+                    int red = static_cast<int>(33 + ratio * (152 - 33));
+                    int green = static_cast<int>(37 + ratio * (195 - 37));
+                    int blue = static_cast<int>(43 + ratio * (121 - 43));
+                    QColor cellColor(red, green, blue);
+
+                    int x = startX + c * cellSize;
+                    int y = startY + r * cellSize;
+
+                    painter.setBrush(cellColor);
+                    painter.setPen(QColor("#181a1f"));
+                    painter.drawRect(x, y, cellSize, cellSize);
+
+                    painter.setPen(ratio > 0.5 ? QColor("#1e1e1e") : QColor("#abb2bf"));
+                    painter.setFont(QFont("Segoe UI", 8, QFont::Bold));
+                    painter.drawText(QRect(x, y, cellSize, cellSize), Qt::AlignCenter, QString::number(val));
+                }
+            }
+        }
+    }
+    else if (visType == VisGraph) {
+        int numNodes = graphNodes.size();
+        if (numNodes > 0) {
+            int centerX = contentX + contentWidth / 2;
+            int centerY = contentY + contentHeight / 2;
+            int radius = qMin(contentWidth, contentHeight) / 2 - 25;
+            if (radius < 20) radius = 20;
+
+            QHash<int, QPoint> nodePos;
+            for (int i = 0; i < numNodes; ++i) {
+                double angle = (2.0 * M_PI * i) / numNodes;
+                int x = centerX + static_cast<int>(radius * qCos(angle));
+                int y = centerY + static_cast<int>(radius * qSin(angle));
+                nodePos[graphNodes[i]] = QPoint(x, y);
+            }
+
+            painter.setPen(QPen(QColor("#5c6370"), 2));
+            for (const auto& edge : graphEdges) {
+                if (nodePos.contains(edge.first) && nodePos.contains(edge.second)) {
+                    QPoint p1 = nodePos[edge.first];
+                    QPoint p2 = nodePos[edge.second];
+                    painter.drawLine(p1, p2);
+                }
+            }
+
+            int nodeRadius = 15;
+            for (int i = 0; i < numNodes; ++i) {
+                int nodeId = graphNodes[i];
+                QPoint pos = nodePos[nodeId];
+
+                QRadialGradient grad(pos.x(), pos.y(), nodeRadius);
+                grad.setColorAt(0.0, QColor("#61afef"));
+                grad.setColorAt(1.0, QColor("#4db5ff"));
+
+                painter.setBrush(grad);
+                painter.setPen(QPen(QColor("#ffffff"), 1.5));
+                painter.drawEllipse(pos, nodeRadius, nodeRadius);
+
+                painter.setPen(QColor("#1e1e1e"));
+                painter.setFont(QFont("Segoe UI", 9, QFont::Bold));
+                painter.drawText(QRect(pos.x() - nodeRadius, pos.y() - nodeRadius, nodeRadius * 2, nodeRadius * 2), Qt::AlignCenter, QString::number(nodeId));
+            }
+        }
+    }
 }

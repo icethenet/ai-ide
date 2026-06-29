@@ -147,6 +147,8 @@ void LspClient::parseMessage(const QByteArray& payload) {
             emit definitionReady(id, targetPath, targetLine);
         } else if (method == "textDocument/references") {
             emit referencesReady(id, obj["result"].toArray());
+        } else if (method == "textDocument/documentSymbol") {
+            emit documentSymbolsReady(id, obj["result"].toArray());
         }
     }
 }
@@ -233,5 +235,18 @@ int LspClient::requestReferences(const QString& filePath, int line, int characte
     params["context"] = context;
 
     sendRequest("textDocument/references", params, id);
+    return id;
+}
+
+int LspClient::requestDocumentSymbols(const QString& filePath) {
+    int id = nextId++;
+    pendingRequests[id] = "textDocument/documentSymbol";
+
+    QJsonObject params;
+    QJsonObject textDocument;
+    textDocument["uri"] = QUrl::fromLocalFile(filePath).toString();
+    params["textDocument"] = textDocument;
+
+    sendRequest("textDocument/documentSymbol", params, id);
     return id;
 }

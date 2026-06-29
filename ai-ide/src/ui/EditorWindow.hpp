@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QStringListModel>
+#include "../ai/AIAction.hpp"
 
 class CustomEditor;
 class FileBrowser;
@@ -13,6 +14,9 @@ class AIPatchController;
 class CommandPalette;
 class ClipboardListener;
 class FindReplaceDialog;
+class OutlineWidget;
+class GitConflictResolver;
+class RemoteServerWidget;
 class QShowEvent;
 class QSplitter;
 class QListView;
@@ -31,13 +35,18 @@ class EditorWindow : public QMainWindow {
 public:
     explicit EditorWindow(QWidget *parent = nullptr);
     CustomEditor* currentEditor() const;
+    void openFileInTab(const QString& path);
+    void executeAIAction(const AIAction& action);
+    QString getActiveProgrammingDirectory() const;
+
+signals:
+    void buildCompleted(int exitCode, const QString& buildErrors);
 
 private:
     void createMenus();
     void createDocks();
     void createCentralEditor();
     void showEvent(QShowEvent* event) override;
-    void openFileInTab(const QString& path);
     void runBuild();
     void readBuildOutput();
     void buildFinished(int exitCode, int exitStatus);
@@ -45,6 +54,8 @@ private:
     void gotoLine(const QString& file, int line);
     void openWelcomeTab();
     void openSearchTab();
+    void openConflictResolver(const QString& filePath);
+    void openSshTerminal(const QString& host, const QString& port, const QString& user);
     void showCommandPalette();
     bool eventFilter(QObject* obj, QEvent* event) override;
     void updateDocumentDiagnostics();
@@ -75,9 +86,14 @@ private:
     QStringListModel* historyModel;
     QString buildBuffer;
     FindReplaceDialog* findReplaceDialog;
+    OutlineWidget* outlineWidget;
+    RemoteServerWidget* serverWidget;
+    int lastOutlineRequestId;
 
     QComboBox* cmakeTargetCombo;
     QComboBox* cmakeBuildTypeCombo;
+    QComboBox* targetEnvCombo;
+    QString dockerImageName;
     QTableWidget* referencesTable;
 
     struct EditorDiagnostic {

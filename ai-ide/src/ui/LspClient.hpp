@@ -21,11 +21,13 @@ public:
     int requestCompletion(const QString& filePath, int line, int character);
     int requestDefinition(const QString& filePath, int line, int character);
     int requestReferences(const QString& filePath, int line, int character);
+    int requestDocumentSymbols(const QString& filePath);
 
 signals:
     void completionReady(int id, const QJsonArray& items);
     void definitionReady(int id, const QString& filePath, int line);
     void referencesReady(int id, const QJsonArray& locations);
+    void documentSymbolsReady(int id, const QJsonArray& symbols);
 
 private slots:
     void readOutput();

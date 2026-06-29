@@ -14,6 +14,9 @@
 #include "WelcomeWidget.hpp"
 #include "CommandPalette.hpp"
 #include "SearchWidget.hpp"
+#include "OutlineWidget.hpp"
+#include "GitConflictResolver.hpp"
+#include "RemoteServerWidget.hpp"
 #include "GitWidget.hpp"
 #include "LspClient.hpp"
 #include <QComboBox>
@@ -21,6 +24,7 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QUrl>
+#include <QDesktopServices>
 #include <QIcon>
 #include <QPixmap>
 
@@ -70,6 +74,8 @@ EditorWindow::EditorWindow(QWidget *parent)
       cmdLineEdit(nullptr),
       cmakeTargetCombo(nullptr),
       cmakeBuildTypeCombo(nullptr),
+      targetEnvCombo(nullptr),
+      dockerImageName("python:3.10-slim"),
       clipboardListener(nullptr),
       historyModel(new QStringListModel(this)),
       findReplaceDialog(nullptr)
@@ -199,16 +205,33 @@ void EditorWindow::createCentralEditor() {
         if (w) w->deleteLater();
     });
 
-    // Synchronize pathLineEdit with active tab changes
+    // Synchronize pathLineEdit and Outline view with active tab changes
     connect(tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
         if (index != -1) {
             auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(index));
             if (ed) {
-                pathLineEdit->setText(ed->currentFilePath());
-            } else if (qobject_cast<SearchWidget*>(tabWidget->widget(index))) {
-                pathLineEdit->setText("Workspace Search");
+                QString path = ed->currentFilePath();
+                pathLineEdit->setText(path);
+                if (outlineWidget) {
+                    if (!path.isEmpty()) {
+                        lastOutlineRequestId = LspClient::instance().requestDocumentSymbols(path);
+                    } else {
+                        outlineWidget->clearOutline();
+                    }
+                }
             } else {
-                pathLineEdit->setText("Welcome Page");
+                if (qobject_cast<SearchWidget*>(tabWidget->widget(index))) {
+                    pathLineEdit->setText("Workspace Search");
+                } else {
+                    pathLineEdit->setText("Welcome Page");
+                }
+                if (outlineWidget) {
+                    outlineWidget->clearOutline();
+                }
+            }
+        } else {
+            if (outlineWidget) {
+                outlineWidget->clearOutline();
             }
         }
     });
@@ -287,12 +310,34 @@ void EditorWindow::createCentralEditor() {
                                     "QComboBox::drop-down { border: none; }"
                                     "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
 
+    targetEnvCombo = new QComboBox(this);
+    targetEnvCombo->addItems(QStringList() << "Local Host" << "WSL (Ubuntu)" << "Docker Container");
+    targetEnvCombo->setStyleSheet("QComboBox { background-color: #2c313c; color: #abb2bf; border: 1px solid #3e4452; border-radius: 4px; padding: 2px 6px; font-family: 'Segoe UI', Arial; font-size: 11px; }"
+                                  "QComboBox::drop-down { border: none; }"
+                                  "QComboBox QAbstractItemView { background-color: #2c313c; color: #abb2bf; selection-background-color: #3e4452; }");
+
+    connect(targetEnvCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (targetEnvCombo->currentText() == "Docker Container") {
+            bool ok = false;
+            QString img = QInputDialog::getText(this, "Docker Image Settings",
+                                                "Specify Docker image name to run compilation inside:",
+                                                QLineEdit::Normal, dockerImageName, &ok);
+            if (ok && !img.trimmed().isEmpty()) {
+                dockerImageName = img.trimmed();
+            }
+        }
+    });
+
     if (statusBar()) {
+        auto* envLabel = new QLabel("  Env: ", this);
+        envLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         auto* buildLabel = new QLabel("  Config: ", this);
         buildLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         auto* targetLabel = new QLabel("  Target: ", this);
         targetLabel->setStyleSheet("QLabel { color: #abb2bf; font-family: 'Segoe UI', Arial; font-size: 11px; }");
         
+        statusBar()->addPermanentWidget(envLabel);
+        statusBar()->addPermanentWidget(targetEnvCombo);
         statusBar()->addPermanentWidget(buildLabel);
         statusBar()->addPermanentWidget(cmakeBuildTypeCombo);
         statusBar()->addPermanentWidget(targetLabel);
@@ -322,6 +367,18 @@ void EditorWindow::createCentralEditor() {
 }
 
 void EditorWindow::openFileInTab(const QString& path) {
+    if (!path.isEmpty()) {
+        QString targetAbs = QFileInfo(path).absoluteFilePath();
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            auto* ed = qobject_cast<CustomEditor*>(tabWidget->widget(i));
+            if (ed && QFileInfo(ed->currentFilePath()).absoluteFilePath() == targetAbs) {
+                tabWidget->setCurrentIndex(i);
+                if (pathLineEdit) pathLineEdit->setText(path);
+                return;
+            }
+        }
+    }
+
     auto* newEditor = new CustomEditor(this);
     if (!path.isEmpty()) newEditor->openFile(path);
     
@@ -330,6 +387,12 @@ void EditorWindow::openFileInTab(const QString& path) {
         if (idx != -1) {
             tabWidget->removeTab(idx);
             newEditor->deleteLater();
+        }
+    });
+
+    connect(newEditor, &CustomEditor::fileSaved, this, [this](const QString& path) {
+        if (outlineWidget && !path.isEmpty()) {
+            lastOutlineRequestId = LspClient::instance().requestDocumentSymbols(path);
         }
     });
 
@@ -386,6 +449,41 @@ void EditorWindow::openSearchTab() {
         int idx = tabWidget->addTab(sWidget, "Workspace Search");
         tabWidget->setCurrentIndex(idx);
     }
+}
+
+void EditorWindow::openConflictResolver(const QString& filePath) {
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        auto* resolver = qobject_cast<GitConflictResolver*>(tabWidget->widget(i));
+        if (resolver && resolver->getFilePath() == filePath) {
+            tabWidget->setCurrentIndex(i);
+            return;
+        }
+    }
+
+    auto* resolver = new GitConflictResolver(filePath, this);
+    connect(resolver, &GitConflictResolver::resolved, this, [this, resolver](const QString& path) {
+        int idx = tabWidget->indexOf(resolver);
+        if (idx != -1) {
+            tabWidget->removeTab(idx);
+            resolver->deleteLater();
+        }
+        if (gitWidget) gitWidget->refreshStatus();
+        QMessageBox::information(this, "Conflict Resolved", "The file has been successfully merged and staged.");
+    });
+
+    int idx = tabWidget->addTab(resolver, "Resolve: " + QFileInfo(filePath).fileName());
+    tabWidget->setCurrentIndex(idx);
+}
+
+void EditorWindow::openSshTerminal(const QString& host, const QString& port, const QString& user) {
+    if (!bottomTabWidget) return;
+
+    QStringList args;
+    args << QString("%1@%2").arg(user).arg(host) << "-p" << port;
+
+    auto* sshTab = new TerminalWidget("ssh.exe", args, this);
+    int idx = bottomTabWidget->addTab(sshTab, QString("SSH: %1").arg(host));
+    bottomTabWidget->setCurrentIndex(idx);
 }
 
 void EditorWindow::showCommandPalette() {
@@ -488,12 +586,31 @@ void EditorWindow::createDocks() {
 
     fileBrowser = new FileBrowser(leftTabs);
     gitWidget = new GitWidget(leftTabs);
+    outlineWidget = new OutlineWidget(leftTabs);
+    serverWidget = new RemoteServerWidget(leftTabs);
 
     leftTabs->addTab(fileBrowser, "Files");
     leftTabs->addTab(gitWidget, "Git");
+    leftTabs->addTab(outlineWidget, "Outline");
+    leftTabs->addTab(serverWidget, "Servers");
+
+    connect(gitWidget, &GitWidget::conflictResolutionRequested, this, &EditorWindow::openConflictResolver);
+    connect(serverWidget, &RemoteServerWidget::openSshRequested, this, &EditorWindow::openSshTerminal);
  
     fileDock->setWidget(leftTabs);
     addDockWidget(Qt::LeftDockWidgetArea, fileDock);
+
+    connect(outlineWidget, &OutlineWidget::lineNavigationRequested, this, [this](int line) {
+        if (auto* ed = currentEditor()) {
+            gotoLine(ed->currentFilePath(), line);
+        }
+    });
+
+    connect(&LspClient::instance(), &LspClient::documentSymbolsReady, this, [this](int id, const QJsonArray& symbols) {
+        if (id == lastOutlineRequestId && outlineWidget) {
+            outlineWidget->updateSymbols(symbols);
+        }
+    });
  
     connect(fileBrowser, &FileBrowser::fileOpened, this, [this](const QString& path) {
         openFileInTab(path);
@@ -537,20 +654,19 @@ void EditorWindow::createDocks() {
     aiDock->setWidget(aiPanel);
     addDockWidget(Qt::RightDockWidgetArea, aiDock);
 
-    // Connect AI Chat signals to the Central Editor
-    connect(aiPanel, &AIChatPanel::applyToEditor, this, [this](const QString& code) {
+    // Connect AI Chat signals
+    connect(aiPanel, &AIChatPanel::requestActiveFileContext, this, [this](QString& filePath, QString& fileContent, QString& baseDir) {
+        baseDir = getActiveProgrammingDirectory();
         if (auto* ed = currentEditor()) {
-            auto* textEdit = ed->findChild<QPlainTextEdit*>();
-            if (textEdit) textEdit->setPlainText(code);
+            filePath = ed->currentFilePath();
+            if (auto* codeEd = ed->getCodeEditor()) {
+                fileContent = codeEd->toPlainText();
+            }
         }
     });
 
-    connect(aiPanel, &AIChatPanel::createNewFile, this, [this](const QString& code) {
-        openFileInTab("");
-        if (auto* ed = currentEditor()) {
-            auto* textEdit = ed->findChild<QPlainTextEdit*>();
-            if (textEdit) textEdit->setPlainText(code);
-        }
+    connect(aiPanel, &AIChatPanel::executeAction, this, [this](const AIAction& action) {
+        executeAIAction(action);
     });
 
     connect(aiPanel, &AIChatPanel::promptArchived, this, [this](const QString& summary) {
@@ -558,6 +674,9 @@ void EditorWindow::createDocks() {
         list.prepend(summary);
         historyModel->setStringList(list);
     });
+
+    connect(aiPanel, &AIChatPanel::requestBuildRun, this, &EditorWindow::runBuild);
+    connect(this, &EditorWindow::buildCompleted, aiPanel, &AIChatPanel::handleBuildFinished);
 
     aiPatchController = new AIPatchController(nullptr, this);
 }
@@ -622,6 +741,27 @@ void EditorWindow::createMenus() {
     });
 
     auto *editMenu = menuBar()->addMenu("&Edit");
+
+    auto *undoAction = editMenu->addAction("Undo", [this]() {
+        if (auto* ed = currentEditor()) {
+            if (auto* codeEd = ed->getCodeEditor()) {
+                codeEd->undo();
+            }
+        }
+    });
+    undoAction->setShortcut(QKeySequence::Undo);
+
+    auto *redoAction = editMenu->addAction("Redo", [this]() {
+        if (auto* ed = currentEditor()) {
+            if (auto* codeEd = ed->getCodeEditor()) {
+                codeEd->redo();
+            }
+        }
+    });
+    redoAction->setShortcut(QKeySequence::Redo);
+
+    editMenu->addSeparator();
+
     auto *findAction = editMenu->addAction("Find & Replace...", [this]() {
         if (!findReplaceDialog) {
             findReplaceDialog = new FindReplaceDialog(this);
@@ -707,8 +847,23 @@ void EditorWindow::runBuild() {
     
     buildProcess->setWorkingDirectory(QDir::currentPath());
 
+    QString program = "python";
     QStringList args;
-    args << "build.py";
+
+    QString env = targetEnvCombo ? targetEnvCombo->currentText() : "Local Host";
+
+    if (env == "WSL (Ubuntu)") {
+        program = "wsl.exe";
+        args << "python3" << "build.py";
+    } else if (env == "Docker Container") {
+        program = "docker.exe";
+        QString currentPath = QDir::currentPath();
+        args << "run" << "--rm" << "-v" << QString("%1:/workspace").arg(currentPath) << "-w" << "/workspace" << dockerImageName << "python3" << "build.py";
+    } else {
+        program = "python";
+        args << "build.py";
+    }
+
     if (cmakeBuildTypeCombo) {
         args << "--build-type" << cmakeBuildTypeCombo->currentText();
     }
@@ -718,7 +873,7 @@ void EditorWindow::runBuild() {
             args << "--target" << tgt;
         }
     }
-    buildProcess->start("python", args);
+    buildProcess->start(program, args);
 }
 
 void EditorWindow::readBuildOutput() {
@@ -760,6 +915,14 @@ void EditorWindow::buildFinished(int exitCode, int exitStatus) {
             statusBar()->showMessage("Build Failed (Exit Code: " + QString::number(exitCode) + ")", 5000);
         }
     }
+
+    QString buildErrors = "";
+    for (const auto& diag : activeDiagnostics) {
+        if (diag.isError) {
+            buildErrors += QString("%1:%2 - %3\n").arg(diag.file).arg(diag.line).arg(diag.message);
+        }
+    }
+    emit buildCompleted(exitCode, buildErrors);
 }
 
 void EditorWindow::parseBuildLine(const QString& line) {
@@ -893,4 +1056,129 @@ void EditorWindow::fixProblemWithAI(const QString& filePath, int line, const QSt
 
     aiPatchController->setEditor(currentEditor());
     aiPatchController->requestRefactor(prompt);
+}
+
+QString EditorWindow::getActiveProgrammingDirectory() const {
+    if (fileBrowser && !fileBrowser->rootPath().isEmpty()) {
+        return fileBrowser->rootPath();
+    }
+    if (auto* ed = currentEditor()) {
+        QString filePath = ed->currentFilePath();
+        if (!filePath.isEmpty()) {
+            return QFileInfo(filePath).absolutePath();
+        }
+    }
+    return QDir::currentPath();
+}
+
+void EditorWindow::executeAIAction(const AIAction& action) {
+    QString baseDir = getActiveProgrammingDirectory();
+
+    if (action.type == "create_file") {
+        QString targetPath = action.path;
+        if (targetPath.isEmpty()) targetPath = "untitled_file.cpp";
+        
+        QString absPath = QFileInfo(targetPath).isAbsolute()
+            ? targetPath
+            : QDir(baseDir).absoluteFilePath(targetPath);
+        QDir().mkpath(QFileInfo(absPath).path());
+        
+        QFile file(absPath);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&file);
+            out << action.content;
+            file.close();
+            openFileInTab(absPath);
+        } else {
+            QMessageBox::warning(this, "AI Actions", QString("Failed to create file: %1").arg(targetPath));
+        }
+    }
+    else if (action.type == "modify_file") {
+        if (action.path.isEmpty()) return;
+        QString absPath = QFileInfo(action.path).isAbsolute()
+            ? action.path
+            : QDir(baseDir).absoluteFilePath(action.path);
+        
+        QString originalContent = "";
+        QFile fileRead(absPath);
+        if (fileRead.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            originalContent = QTextStream(&fileRead).readAll();
+            fileRead.close();
+        }
+
+        bool success = true;
+        QString errorMsg = "";
+        QString modifiedContent = AIChatPanel::applySearchReplace(originalContent, action.content, success, errorMsg);
+
+        if (!success) {
+            QMessageBox::critical(this, "AI Actions Error", QString("Failed to apply actions to file: %1\n%2").arg(action.path).arg(errorMsg));
+            return;
+        }
+
+        QDir().mkpath(QFileInfo(absPath).path());
+        QFile fileWrite(absPath);
+        if (fileWrite.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&fileWrite);
+            out << modifiedContent;
+            fileWrite.close();
+        } else {
+            QMessageBox::warning(this, "AI Actions", QString("Failed to write to file: %1").arg(action.path));
+            return;
+        }
+
+        openFileInTab(absPath);
+        if (auto* ed = currentEditor()) {
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) {
+                codeEd->setPlainText(modifiedContent);
+            }
+        }
+    }
+    else if (action.type == "modify_current_editor") {
+        if (auto* ed = currentEditor()) {
+            QString originalContent = "";
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) originalContent = codeEd->toPlainText();
+
+            bool success = true;
+            QString errorMsg = "";
+            QString modifiedContent = AIChatPanel::applySearchReplace(originalContent, action.content, success, errorMsg);
+
+            if (!success) {
+                QMessageBox::critical(this, "AI Actions Error", QString("Failed to apply actions to active editor.\n%1").arg(errorMsg));
+                return;
+            }
+
+            QString absPath = ed->currentFilePath();
+            if (!absPath.isEmpty()) {
+                QFile file(absPath);
+                if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    QTextStream out(&file);
+                    out << modifiedContent;
+                    file.close();
+                }
+            }
+            if (codeEd) {
+                codeEd->setPlainText(modifiedContent);
+            }
+        } else {
+            openFileInTab("");
+            if (auto* ed = currentEditor()) {
+                auto* codeEd = ed->getCodeEditor();
+                if (codeEd) {
+                    codeEd->setPlainText(action.content);
+                }
+            }
+        }
+    }
+    else if (action.type == "insert_at_cursor") {
+        if (auto* ed = currentEditor()) {
+            auto* codeEd = ed->getCodeEditor();
+            if (codeEd) {
+                codeEd->insertPlainText(action.content);
+            }
+        } else {
+            QMessageBox::warning(this, "AI Actions", "No active editor to insert code at cursor.");
+        }
+    }
 }

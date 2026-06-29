@@ -2,12 +2,37 @@
 #include <QWidget>
 #include <QProcess>
 #include <QString>
+#include <vector>
+#include <utility>
 
 class QPushButton;
 class QPlainTextEdit;
 class QTreeWidget;
 class QLineEdit;
 class QLabel;
+
+enum VisType { VisNone, VisArray, VisMatrix, VisGraph };
+
+class VisualInspectorWidget : public QWidget {
+    Q_OBJECT
+public:
+    explicit VisualInspectorWidget(QWidget* parent = nullptr);
+    void inspectVariable(const QString& name, const QString& type, const QString& val);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    QString varName;
+    QString varType;
+    QString varVal;
+
+    VisType visType;
+    std::vector<double> arrayData;
+    std::vector<std::vector<double>> matrixData;
+    std::vector<int> graphNodes;
+    std::vector<std::pair<int, int>> graphEdges;
+};
 
 class DebugWidget : public QWidget {
     Q_OBJECT
@@ -30,7 +55,6 @@ private:
     void updateVariables();
     void addVariable(const QString& name, const QString& type, const QString& val);
     
-    // Simulation mode helpers
     void enterSimulationMode();
     void runSimulationStep();
 
@@ -48,4 +72,5 @@ private:
     QPlainTextEdit* consoleLog;
     QLineEdit* cmdInput;
     QTreeWidget* variablesTree;
+    VisualInspectorWidget* visualInspector;
 };
