@@ -1,83 +1,107 @@
 # AI-IDE 🚀
 
-An AI-augmented C++ desktop Integrated Development Environment (IDE) built with **Qt 6**, **CMake**, and **Ninja**. AI-IDE blends classical compiler tooling, LSP semantic indexers, and modern visualizers with autonomous agentic coding loops.
+An AI-augmented C++ desktop Integrated Development Environment (IDE) built with **Qt 6**, **CMake**, and **Ninja**. AI-IDE blends classic compiler diagnostics, LSP semantic indexing, and graphical data visualizers with autonomous agentic self-repair loops.
 
 ---
 
-## Key Features
+## 📐 System Design & Architecture
 
-### 💻 Advanced Editor & Workspace
-- **Sleek Dark Theme**: Designed with custom layouts, colors, and responsive toolbars.
-- **Syntax Highlighting**: Real-time C++ token highlighters for enhanced readability.
-- **Workspace Navigation**: Complete tree explorer browser and dynamic workspace file selector.
+AI-IDE is designed around a decoupled multi-process architecture. High-latency operations are offloaded asynchronously to background threads or separate subsystem engines to ensure a completely fluid, non-blocking UI.
 
-### 🧠 Agentic AI Coding Pipeline
-- **Action Planner**: Checkbox lists detailing plans, complete with visual code diff overlays.
-- **Multi-File Autocorrect Loop**: Autonomous debugging engine that captures compilation failures and feeds diagnostics back to the LLM agent to recursively repair code until builds pass.
-- **Semantic LSP indexer**: Out-of-the-box integration with `clangd` for symbol outline lookups and references.
+```mermaid
+graph TD
+    PA[Phase A: Editor Core & Layout Tuning] --> PB[Phase B: Source Control & Search]
+    PB --> PC[Phase C: Language Server Client]
+    PC --> PD[Phase D: Visual Debugger Integration]
+    PD --> PE[Phase E: AI Context & Copilot]
+```
 
-### 📊 Visual Debugging & Symbols Outline
-- **AST Outline View**: Sidebar symbol hierarchies (namespaces, classes, methods, fields) with filter search and jump-to-line navigation.
-- **Visual Debugger**: Render data structures as charts (arrays), heatmaps (matrices), or node-link layouts (JSON graphs) during breakpoint steps.
-
-### 🐙 Visual Git & Merge Resolver
-- **Visual Commit Tree**: History timeline delegate painting branches and commit tracks directly in the status table.
-- **Three-Pane Conflict Resolver**: Interactive side-by-side conflict resolver (Local/Remote/Merged panels) with quick-accept helpers, auto-staging files on merge completion.
-
-### 🐳 Sandbox & Remote Environments
-- **Container Compilation**: Target environment switcher (Local Host, WSL Ubuntu, Docker Container) allowing files to compile within target sandbox containers seamlessly.
-- **Remote Server Manager**: Asynchronous TCP socket latency ping testing and interactive native SSH terminal shell tabs.
+### Layout Split Structure (`QSplitter`)
+The main window utilizes a vertical `QSplitter` dividing pane resources:
+*   **Top Workspace**: Tabbed `QTabWidget` hosting the `CodeEditor` instances (with custom syntax highlight logic, gutter line numbers, and gutter breakpoint circles).
+*   **Bottom Pane**: Tabbed container holding horizontal/vertical recursive splits of PowerShell/Bash terminals, LLDB-MI debugger outputs, regex problems parser lists, and active AI chat models history.
+*   **Left Dock Area**: Collapsible tabbed pane organizing the filesystem explorer browser, visual git status stages, LSP symbols outline, and TCP server connectivity manager.
 
 ---
 
-## File Structure
+## ⚡ Core Features & Subsystems
 
-- **`add_custom_editor_and_features.py`**: The single source of truth for generating all C++ UI, logic, and configuration files for the project.
-- **`build.py`**: Clean, configure, compile, and run script.
-- **`run-app.bat`**: Runs the compiled binary injecting the Qt library dependencies path.
-- **`ai-ide/`**: CMake configuration workspace containing generated source code files.
+### 💻 Smart Editor & Workspace
+- **Highlighter**: Custom `QSyntaxHighlighter` color-coding classes, keywords, preprocessors, values, and comments.
+- **Gutters**: Vertically synchronized gutter areas handling line numbers, breakpoint markers, and git edit diff highlights (added/modified/deleted indicators).
+- **LSP Integration**: Stdin/stdout JSON-RPC pipe interface with `clangd.exe` supporting fuzzy autocompletion popup overlays (`Ctrl+Space`), definition redirects, and references tracking.
+
+### 🧠 Agentic Self-Repair Pipeline
+- **Checkbox Planner**: Clickable checkboxes to configure and approve step-by-step implementation changes, accompanied by color-coded code diff editors.
+- **Compile & Fix Loop**: Automatically captures compiler errors, warning diagnostics, and location lines, feeding them back into the LLM provider to recursively rebuild and self-correct files in a loop until the compile succeeds.
+
+### 📊 Visual Debugging & AST Outline
+- **AST Outline View**: Sidebar navigation sorting document namespaces, classes, methods, and functions with query filters and scroll-to-line callbacks.
+- **Visualizer**: Renders collection values inside paused debugging frame scopes (gradient bar charts for 1D arrays, color heatmaps for 2D matrices, and trigonometric node-link graphs for JSON networks).
+
+### 🐙 Git Client & 3-Pane Conflict Resolver
+- **Git History Tree**: Delegate-painted commit nodes and branch track lines drawn inline next to files status logs.
+- **Three-Pane Merger**: Split-view resolving git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). Maps HEAD Local (left), Incoming Remote (right), and Editable Merged results (center) with quick-accept helpers. Stages changes automatically.
+
+### 🐳 Target Environments & Networking
+- **Compiler Redirections**: Status bar target switcher executing compile commands on the Local Host, inside WSL bash, or via workspace mounts inside Docker containers.
+- **Server Manager**: Asynchronous TCP socket latency ping testing, and native SSH interactive command shell client (`ssh.exe`) integrations.
 
 ---
 
-## Getting Started
+## 🗄️ File Structure
+
+```text
+├── add_custom_editor_and_features.py   # Single source of truth generating C++ source code
+├── build.py                             # Clean, configure, build, and run automation script
+├── run-app.bat                          # Launcher script injecting Qt DLLs into system PATH
+├── idelogo.png                          # Bundled resource window icon
+└── ai-ide/                              # Generated CMake project workspace
+    ├── src/
+    │   ├── main.cpp                     # Application entry point & SSL registrations
+    │   ├── ai/                          # Gemini, Claude, Ollama clients & SQLite database
+    │   ├── git/                         # Git status & staging handlers
+    │   └── ui/                          # GUI widgets & custom delegates
+    └── CMakeLists.txt                   # CMake configuration build options
+```
+
+---
+
+## ⚙️ Getting Started
 
 ### Prerequisites
-- Windows 10/11
-- Qt 6.x (installed at `C:\Qt\6.11.1\llvm-mingw_64`)
-- LLVM-MinGW Toolchain (installed at `C:\Qt\Tools\llvm-mingw_64`)
-- CMake & Ninja
+*   **Operating System**: Windows 10/11
+*   **Qt 6 SDK**: Configured at `C:\Qt\6.11.1\llvm-mingw_64`
+*   **Compiler Toolchain**: LLVM-MinGW (Clang/Clang++ and Ninja) configured at `C:\Qt\Tools\llvm-mingw_64`
+*   **Python 3.x**: Installed and registered in your system environment PATH.
 
-### Build and Run
-To compile and launch the application:
+### Compilation & Launch
+To configure, compile, and run the IDE immediately:
 ```powershell
 python build.py --run
 ```
 
 ---
 
-## Release & Changelog History 📜
+## 📜 Release Changelog History
 
-### v1.0 Release (Latest)
-- **Visual Git Commit Graph**: Color-coded branch track lines and commit nodes.
-- **Three-Pane Conflict Resolver**: Side-by-side local, remote, and editable merge view panels with accept actions.
-- **Remote Container Compilation**: Selector to redirect builds natively to Local Host, WSL bash, or Docker workspace mounts.
-- **Remote Server Manager**: Asynchronous TCP socket latency scanner and native SSH terminal pane integrations.
+### v1.0 Release
+- Added visual Git history commit graph (node delegates).
+- Added three-pane side-by-side conflict resolver.
+- Added compiler target redirects selector (Local, WSL, Docker mounts).
+- Added remote TCP ping server and native SSH terminals support.
 
 ### v0.9 Update - Semantic Search (Vector RAG)
-- **Local SQLite Database**: Caches metadata and float vectors index at `.antigravity/vector_index.db`.
-- **Gemini / Ollama Client**: Dynamic embedding generations on file changes.
-- **Similarity Ranking Engine**: Dot product similarity scoring directly in C++ for fast result matches.
-- **Semantic Toggle Search UI**: Checkbox to toggle vector search with double-click navigation.
+- Added local SQLite databases caching embeddings vectors at `.antigravity/vector_index.db`.
+- Added dynamic embedding client calling Gemini (`text-embedding-004`) or Ollama (`nomic-embed-text`).
+- Added dot-product cosine similarity rankings inside a dedicated semantic search toggle UI.
 
 ### v0.8 Update - AI Connections Settings & Editor Polish
-- **Tabbed Settings Admin Panel**: Dynamic switching and API credential configurations for Ollama, Gemini, Claude, and Antigravity profiles.
-- **Floating Find & Replace Dialog**: Regex, Case-Sensitive, Whole Word filters for scope or folder matches.
-- **TLS/SSL Network backend registration**: Win64 MinGW plugin registration fixing request handshake exceptions.
-- **Logo Resource Bundle & Dashboard styling**.
+- Added provider profile credentials managers for Ollama, Gemini, Claude, and Antigravity.
+- Added floating Find & Replace dialog supporting regular expressions and case filters.
+- Registered OpenSSL plugin directories fixing MinGW network handshakes.
 
-### v0.7 Update - Core IDE Subsystems (Phases A-E)
-- **LSP Integration**: Hooked `clangd` JSON-RPC client to provide fuzzy autocompletion popup list, right-click go-to-definition, and symbols reference indexing.
-- **Splittable Terminal Tiling**: ANSI colors terminal tab holding horizontal/vertical recursive command panes.
-- **Auto-Fix Lightbulbs**: Editor gutter lightbulb signals offering automated C++ compile error fixes with one click.
-- **Git Changes Sidebar & Gutter Diff markers**: Color code gutters matching current git modifications.
-- **Syntax Highlighter & CodeEditor Gutters**: Synchronized lines number gutter highlights.
+### v0.7 Update - Core IDE Subsystems
+- Added persistent `clangd` JSON-RPC connection client.
+- Added splittable terminals tiling recursive horizontal/vertical shell slots.
+- Added editor gutter code diagnostic `💡` AI auto-fix prompts.
